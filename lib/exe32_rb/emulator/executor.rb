@@ -619,6 +619,19 @@ module Exe32Rb
           @cpu.flags.cf = overflow
           @cpu.flags.of = overflow
           write_op(dst, low)
+        when 3
+          # 3-operand form: dst = src1 * src2 (where src2 is an immediate).
+          dst, src1, src2 = instr.operands
+          size = dst.size
+          a = signed_of(read_op(src1, size), size)
+          b_raw = read_op(src2, size)
+          b = signed_of(b_raw, src2.size)
+          product = a * b
+          low = product & mask(size)
+          overflow = (product != sign_extend(low, size, size * 2))
+          @cpu.flags.cf = overflow
+          @cpu.flags.of = overflow
+          write_op(dst, low)
         else
           raise Exe32Rb::ExecutionError, "IMUL with #{instr.operands.size} operands not implemented"
         end

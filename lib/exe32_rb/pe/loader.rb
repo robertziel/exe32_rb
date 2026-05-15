@@ -32,6 +32,7 @@ module Exe32Rb
         parse_section_headers
         attach_raw_data
         imports = parse_imports
+        resources = parse_resources
 
         Image.new(
           path: @path,
@@ -51,7 +52,8 @@ module Exe32Rb
           heap_commit: @heap_commit,
           sections: @sections,
           data_directories: @data_directories,
-          imports: imports
+          imports: imports,
+          resources: resources
         )
       end
 
@@ -247,6 +249,57 @@ module Exe32Rb
         imports
       end
 
+      # Parse the IMAGE_RESOURCE_DIRECTORY tree into a nested Hash:
+      #   { type_id_or_name => { name_id_or_name => { lang_id => entry } } }
+      # where entry = {data_rva:, size:, code_page:, entry_rva:}.
+      # The high bit of an entry's Name field distinguishes string-name (1) vs
+      # integer-id (0). The high bit of OffsetToData distinguishes subdirectory
+      # vs data leaf.
+      def parse_resources
+        dir = @data_directories[Constants::DIR_RESOURCE]
+        return {} if dir.nil? || dir.empty?
+
+        @rsrc_base_rva = dir.virtual_address
+        walk_resource_directory(@rsrc_base_rva)
+      end
+
+      def walk_resource_directory(dir_rva)
+        num_named = read_u16_rva(dir_rva + 12)
+        num_id    = read_u16_rva(dir_rva + 14)
+        result = {}
+        (num_named + num_id).times do |i|
+          entry_rva = dir_rva + 16 + i * 8
+          name_field = read_u32_rva(entry_rva)
+          data_field = read_u32_rva(entry_rva + 4)
+
+          name = if (name_field & 0x8000_0000) != 0
+                   read_resource_string_at(@rsrc_base_rva + (name_field & 0x7FFF_FFFF))
+                 else
+                   name_field & 0xFFFF
+                 end
+
+          if (data_field & 0x8000_0000) != 0
+            result[name] = walk_resource_directory(@rsrc_base_rva + (data_field & 0x7FFF_FFFF))
+          else
+            data_entry_rva = @rsrc_base_rva + (data_field & 0x7FFF_FFFF)
+            result[name] = {
+              data_rva:   read_u32_rva(data_entry_rva),
+              size:       read_u32_rva(data_entry_rva + 4),
+              code_page:  read_u32_rva(data_entry_rva + 8),
+              entry_rva:  data_entry_rva,
+            }
+          end
+        end
+        result
+      end
+
+      def read_resource_string_at(rva)
+        offset = rva_to_file_offset(rva)
+        length = u16_at(offset)
+        bytes  = @data.byteslice(offset + 2, length * 2)
+        bytes.force_encoding(Encoding::UTF_16LE).encode(Encoding::UTF_8)
+      end
+
       def read_thunk(rva)
         @bitness == 64 ? read_u64_rva(rva) : read_u32_rva(rva)
       end
@@ -281,6 +334,7 @@ module Exe32Rb
         section.pointer_to_raw_data + (rva - section.virtual_address)
       end
 
+      def read_u16_rva(rva); u16_at(rva_to_file_offset(rva)); end
       def read_u32_rva(rva); u32_at(rva_to_file_offset(rva)); end
 
       def read_u64_rva(rva)

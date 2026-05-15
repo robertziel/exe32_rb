@@ -46,7 +46,7 @@ module Exe32Rb
                   :image_base, :entry_point_rva, :size_of_image,
                   :size_of_headers, :section_alignment, :file_alignment,
                   :stack_reserve, :stack_commit, :heap_reserve, :heap_commit,
-                  :sections, :data_directories, :imports
+                  :sections, :data_directories, :imports, :resources
 
       def initialize(**attrs)
         @path              = attrs[:path]
@@ -67,6 +67,7 @@ module Exe32Rb
         @sections          = attrs[:sections]          || []
         @data_directories  = attrs[:data_directories]  || []
         @imports           = attrs[:imports]           || []
+        @resources         = attrs[:resources]         || {}
       end
 
       def entry_point
@@ -79,6 +80,27 @@ module Exe32Rb
 
       def directory(index)
         data_directories[index]
+      end
+
+      # Look up a resource by (type, name[, language]). Each of type/name can be
+      # either an integer ID (RT_RCDATA, MAKEINTRESOURCE) or a string (resource
+      # name). Returns the leaf {data_rva:, size:, code_page:, entry_rva:} or nil.
+      def find_resource(type, name, language = nil)
+        type_branch = @resources[type] || @resources[type.is_a?(String) ? type.upcase : type]
+        return nil unless type_branch.is_a?(Hash)
+
+        name_branch = type_branch[name] || type_branch[name.is_a?(String) ? name.upcase : name]
+        return nil unless name_branch.is_a?(Hash)
+
+        if language && name_branch.key?(language)
+          name_branch[language].is_a?(Hash) && name_branch[language].key?(:data_rva) ? name_branch[language] : nil
+        else
+          # Pick first language with a data leaf (recognizable by :data_rva)
+          name_branch.each_value do |v|
+            return v if v.is_a?(Hash) && v.key?(:data_rva)
+          end
+          nil
+        end
       end
     end
   end

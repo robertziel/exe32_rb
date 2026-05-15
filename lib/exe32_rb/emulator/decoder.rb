@@ -122,7 +122,9 @@ module Exe32Rb
           when 0x58..0x5F then pop_r64_short(opcode)
           when 0x63       then movsxd
           when 0x68       then push_imm32
+          when 0x69       then imul_three_op(imm_size: imm_size_z(operand_size_v))
           when 0x6A       then push_imm8
+          when 0x6B       then imul_three_op(imm_size: 8)
           when 0x70..0x7F then jcc_rel8(opcode)
           when 0x80       then group1(8, imm_size: 8)
           when 0x81       then group1(operand_size_v, imm_size: imm_size_z(operand_size_v))
@@ -541,6 +543,15 @@ module Exe32Rb
           sz = operand_size_v
           reg_op, rm_op = decode_modrm(sz)
           instr(:imul, [reg_op, rm_op])
+        end
+
+        # 69 /r iz: IMUL r{v}, r/m{v}, imm{z}
+        # 6B /r ib: IMUL r{v}, r/m{v}, imm8 (sign-extended)
+        def imul_three_op(imm_size:)
+          sz = operand_size_v
+          reg_op, rm_op = decode_modrm(sz)
+          imm = decode_imm(imm_size, signed: true)
+          instr(:imul, [reg_op, rm_op, imm])
         end
 
         def nop

@@ -138,27 +138,61 @@ module Exe32Rb
           end
         end
 
-        # FindResource* return a non-null sentinel that LoadResource turns into
-        # a guest pointer. Without a real resource table parser, the data is
-        # the start of the .rsrc section — enough that callers that just want
-        # a non-null handle (and reads of length 0) won't immediately throw.
-        find_resource = ->(machine, args) {
-          rsrc = machine.image.directory(2) # IMAGE_DIRECTORY_ENTRY_RESOURCE
-          next 0 if rsrc.nil? || rsrc.empty?
-
-          machine.image.image_base + rsrc.virtual_address
+        # FindResource* walks the parsed .rsrc tree. We return the
+        # IMAGE_RESOURCE_DATA_ENTRY virtual address as the HRSRC handle —
+        # LoadResource reads OffsetToData out of it via guest memory just
+        # like real Windows would, so the handle round-trips through any
+        # caller that inspects it.
+        resolve_name = ->(machine, ptr) {
+          # MAKEINTRESOURCE places the integer in the low 16 bits with high
+          # word zero. Anything else is a wide string pointer.
+          if (ptr & 0xFFFF_0000) == 0 && ptr != 0
+            ptr & 0xFFFF
+          elsif ptr == 0
+            nil
+          else
+            machine.read_wstring(ptr)
+          end
         }
-        dispatcher.install_handler("kernel32.dll", "FindResourceA",   args: 3, &find_resource)
-        dispatcher.install_handler("kernel32.dll", "FindResourceW",   args: 3, &find_resource)
-        dispatcher.install_handler("kernel32.dll", "FindResourceExW", args: 4) do |machine, _args|
-          find_resource.call(machine, [])
+
+        find_resource = ->(machine, args, type_first: false) {
+          if type_first
+            type = resolve_name.call(machine, args[1])
+            name = resolve_name.call(machine, args[2])
+          else
+            name = resolve_name.call(machine, args[1])
+            type = resolve_name.call(machine, args[2])
+          end
+          entry = machine.image.find_resource(type, name)
+          entry ? machine.image.image_base + entry[:entry_rva] : 0
+        }
+
+        dispatcher.install_handler("kernel32.dll", "FindResourceA", args: 3) do |machine, args|
+          find_resource.call(machine, args)
         end
-        dispatcher.install_handler("kernel32.dll", "LoadResource", args: 2) { |_, args| args[1] }
+        dispatcher.install_handler("kernel32.dll", "FindResourceW", args: 3) do |machine, args|
+          find_resource.call(machine, args)
+        end
+        dispatcher.install_handler("kernel32.dll", "FindResourceExW", args: 4) do |machine, args|
+          # Args: hModule, lpType, lpName, wLanguage  (type before name here)
+          find_resource.call(machine, args, type_first: true)
+        end
+
+        dispatcher.install_handler("kernel32.dll", "SizeofResource", args: 2) do |machine, args|
+          entry_va = args[1] & 0xFFFF_FFFF
+          next 0 if entry_va == 0
+
+          machine.memory.read_u32(entry_va + 4) # Size field of IMAGE_RESOURCE_DATA_ENTRY
+        end
+
+        dispatcher.install_handler("kernel32.dll", "LoadResource", args: 2) do |machine, args|
+          entry_va = args[1] & 0xFFFF_FFFF
+          next 0 if entry_va == 0
+
+          data_rva = machine.memory.read_u32(entry_va) # OffsetToData (RVA in image)
+          machine.image.image_base + data_rva
+        end
         dispatcher.install_handler("kernel32.dll", "LockResource", args: 1) { |_, args| args[0] }
-        dispatcher.install_handler("kernel32.dll", "SizeofResource", args: 2) do |machine, _args|
-          rsrc = machine.image.directory(2)
-          rsrc.nil? ? 0 : rsrc.size
-        end
 
         dispatcher.install_handler("kernel32.dll", "DeleteFileW", args: 1) do |machine, args|
           File.delete(machine.read_wstring(args[0]))
@@ -183,6 +217,52 @@ module Exe32Rb
         # chain. We don't model SEH, so returning to the guest lands the
         # CPU in undefined territory. Halt cleanly instead and surface the
         # exception code so the trigger is visible.
+        # Minimal registry stubs: pretend the key opens and every value reads
+        # back as empty. The installer is checking system state (Windows
+        # version, presence of components) and a blanket "yes that exists,
+        # but is empty" is usually friendlier than ERROR_FILE_NOT_FOUND.
+        dispatcher.install_handler("advapi32.dll", "RegOpenKeyExW", args: 5) do |machine, args|
+          phk = args[4] & 0xFFFF_FFFF
+          machine.memory.write_u32(phk, 0x8000_0001) if phk != 0
+          0 # ERROR_SUCCESS
+        end
+        dispatcher.install_handler("advapi32.dll", "RegOpenKeyExA", args: 5) do |machine, args|
+          phk = args[4] & 0xFFFF_FFFF
+          machine.memory.write_u32(phk, 0x8000_0001) if phk != 0
+          0
+        end
+        dispatcher.install_handler("advapi32.dll", "RegQueryValueExW", args: 6) do |machine, args|
+          lp_type     = args[2] & 0xFFFF_FFFF
+          lp_data     = args[3] & 0xFFFF_FFFF
+          lpcb_data   = args[4] & 0xFFFF_FFFF
+          # Pretend every value is a DWORD = 0x0409 (en-US LCID). That's
+          # what Delphi RTL is usually fishing for; returning 0 was making
+          # it interpret "no locale" and raise.
+          machine.memory.write_u32(lp_type, 4) if lp_type != 0
+          if lp_data != 0 && lpcb_data != 0
+            avail = machine.memory.read_u32(lpcb_data)
+            if avail >= 4
+              machine.memory.write_u32(lp_data, 0x0409)
+              machine.memory.write_u32(lpcb_data, 4)
+            end
+          end
+          0
+        end
+        dispatcher.install_handler("advapi32.dll", "RegQueryValueExA", args: 6) do |machine, args|
+          lp_type   = args[2] & 0xFFFF_FFFF
+          lp_data   = args[3] & 0xFFFF_FFFF
+          lpcb_data = args[4] & 0xFFFF_FFFF
+          machine.memory.write_u32(lp_type, 4) if lp_type != 0
+          if lp_data != 0 && lpcb_data != 0
+            avail = machine.memory.read_u32(lpcb_data)
+            if avail >= 4
+              machine.memory.write_u32(lp_data, 0)
+              machine.memory.write_u32(lpcb_data, 4)
+            end
+          end
+          0
+        end
+
         dispatcher.install_handler("kernel32.dll", "RaiseException", args: 4) do |_machine, args|
           code = args[0] & 0xFFFF_FFFF
           warn format("[RaiseException] code=0x%08X flags=0x%X (no SEH support; halting)",
@@ -326,6 +406,85 @@ module Exe32Rb
         dispatcher.install_handler("kernel32.dll", "IsDebuggerPresent", args: 0) { |_, _| 0 }
         dispatcher.install_handler("kernel32.dll", "OutputDebugStringA", args: 1) { |_, _| 0 }
         dispatcher.install_handler("kernel32.dll", "OutputDebugStringW", args: 1) { |_, _| 0 }
+
+        # LoadStringW reads from the parsed resource tree. RT_STRING (type 6)
+        # groups strings in blocks of 16 with the resource name = (id/16)+1
+        # and the index within the block = id%16. Each string in the block is
+        # prefixed by a 16-bit length (in chars), followed by UTF-16 data (no
+        # null terminator in the on-disk form).
+        dispatcher.install_handler("user32.dll", "LoadStringW", args: 4) do |machine, args|
+          uid = args[1] & 0xFFFF
+          buf = args[2]
+          cch = args[3] & 0xFFFF_FFFF
+
+          block_id  = (uid / 16) + 1
+          inside    = uid % 16
+          resource  = machine.image.find_resource(6, block_id)
+          next 0 unless resource
+
+          base = machine.image.image_base + resource[:data_rva]
+          pos  = base
+          inside.times do
+            length = machine.memory.read_u16(pos)
+            pos += 2 + length * 2
+          end
+          length = machine.memory.read_u16(pos)
+          pos += 2
+
+          if buf == 0 || cch == 0
+            length
+          else
+            copy = [length, cch - 1].min
+            machine.memory.write(buf, machine.memory.read(pos, copy * 2)) if copy > 0
+            machine.memory.write_u16(buf + copy * 2, 0)
+            copy
+          end
+        end
+
+        # Log MessageBoxW text so we can see what the installer is trying to
+        # tell the (absent) user. Returns IDOK (1) so callers proceed.
+        # CharNextW/A advance one (wide)character; the default "return 0"
+        # stub makes the caller's pointer go null and then crash.
+        dispatcher.install_handler("user32.dll", "CharNextW", args: 1) do |machine, args|
+          ptr = args[0] & 0xFFFF_FFFF
+          next 0 if ptr == 0
+          # Stop advancing past the NUL terminator (Windows semantics).
+          machine.memory.read_u16(ptr) == 0 ? ptr : ptr + 2
+        end
+        dispatcher.install_handler("user32.dll", "CharNextA", args: 1) do |machine, args|
+          ptr = args[0] & 0xFFFF_FFFF
+          next 0 if ptr == 0
+          machine.memory.read_u8(ptr) == 0 ? ptr : ptr + 1
+        end
+        dispatcher.install_handler("user32.dll", "CharUpperBuffW", args: 2) { |_, args| args[1] & 0xFFFF_FFFF }
+        dispatcher.install_handler("user32.dll", "CharLowerBuffW", args: 2) { |_, args| args[1] & 0xFFFF_FFFF }
+
+        dispatcher.install_handler("user32.dll", "MessageBoxW", args: 4) do |machine, args|
+          text = machine.read_wstring(args[1])
+          cap  = machine.read_wstring(args[2])
+          type = args[3] & 0xFFFF_FFFF
+          warn format("[MessageBoxW] caption=%s text=%s type=0x%x", cap.inspect, text.inspect, type)
+          # Return the "primary" button for each MB_* style:
+          #   MB_OK            -> IDOK (1)
+          #   MB_OKCANCEL      -> IDOK (1)
+          #   MB_ABORTRETRYIGNORE -> IDRETRY (4)
+          #   MB_YESNOCANCEL   -> IDYES (6)
+          #   MB_YESNO         -> IDYES (6)
+          #   MB_RETRYCANCEL   -> IDRETRY (4)
+          case type & 0x0F
+          when 0, 1 then 1
+          when 2    then 4
+          when 3, 4 then 6
+          when 5    then 4
+          else 1
+          end
+        end
+        dispatcher.install_handler("user32.dll", "MessageBoxA", args: 4) do |machine, args|
+          text = machine.read_cstring(args[1])
+          cap  = machine.read_cstring(args[2])
+          warn format("[MessageBoxA] caption=%s text=%s", cap.inspect, text.inspect)
+          1
+        end
 
         dispatcher.install_handler("kernel32.dll", "GetSystemInfo", args: 1) do |machine, args|
           ptr = args[0]
