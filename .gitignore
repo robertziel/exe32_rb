@@ -1,0 +1,11 @@
+/.bundle/
+/vendor/bundle/
+/Gemfile.lock
+/coverage/
+/pkg/
+/tmp/
+/examples/
+/trace.log
+*.gem
+*.swp
+.DS_Store

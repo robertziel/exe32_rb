@@ -1,0 +1,333 @@
+# frozen_string_literal: true
+
+module Exe32Rb
+  module Emulator
+    # Top-level orchestrator: owns the loaded image, the virtual memory, the
+    # CPU state, the decoder + executor, and the API dispatcher. Encapsulates
+    # both the setup (mapping sections, stack, scratch, IAT patching) and the
+    # fetch-decode-execute loop.
+    class Machine
+      STACK_SIZE         = 0x0010_0000   # 1 MiB
+      SCRATCH_SIZE       = 0x1000_0000   # 256 MiB heap/scratch (room for installers
+                                         # that VirtualAlloc large payload buffers)
+
+      STACK_BASE_64      = 0x0000_7FFD_0000_0000
+      SCRATCH_BASE_64    = 0x0000_7000_0000_0000
+      TIB_BASE_64        = 0x0000_7FFE_FFFF_0000
+      HALT_SENTINEL_64   = 0xDEAD_BEEF_DEAD_BEEF
+
+      STACK_BASE_32      = 0x7000_0000
+      SCRATCH_BASE_32    = 0x1000_0000  # well below stack/TIB so 16 MB fits
+      TIB_BASE_32        = 0x7EFD_E000
+      HALT_SENTINEL_32   = 0xDEAD_BEEF
+      TIB_SIZE           = 0x1000
+      HANDLE_BASE        = 0x4000_1000
+
+      attr_reader :image, :memory, :cpu, :decoder, :executor, :dispatcher,
+                  :exit_code, :steps_executed, :mode, :halt_sentinel
+
+      def initialize(image, trace: false)
+        @image      = image
+        @mode       = image.bitness || 64
+        @memory     = Memory.new
+        @cpu        = CPU.new(mode: @mode)
+        @decoder    = Decoder.new(@memory, mode: @mode)
+        @executor   = Executor.new(@cpu, @memory)
+        @dispatcher = Api::Dispatcher.new(@memory, mode: @mode)
+        @halted     = false
+        @exit_code  = nil
+        @trace      = trace
+        @stack_base   = @mode == 64 ? STACK_BASE_64   : STACK_BASE_32
+        @scratch_base = @mode == 64 ? SCRATCH_BASE_64 : SCRATCH_BASE_32
+        @halt_sentinel = @mode == 64 ? HALT_SENTINEL_64 : HALT_SENTINEL_32
+        @scratch_cursor = @scratch_base
+        @steps_executed = 0
+        @handles        = {}
+        @next_handle    = HANDLE_BASE
+      end
+
+      def configure
+        ensure_supported_machine
+        map_image
+        map_stack
+        map_scratch
+        map_tib
+        @dispatcher.install_builtins
+        @dispatcher.bind_imports(@image)
+        seed_initial_state
+        self
+      end
+
+      def ensure_supported_machine
+        case @image.machine
+        when PE::Constants::MACHINE_AMD64
+          raise Exe32Rb::ExecutionError, "image is AMD64 but mode is #{@mode}" unless @mode == 64
+        when PE::Constants::MACHINE_I386
+          raise Exe32Rb::ExecutionError, "image is I386 but mode is #{@mode}" unless @mode == 32
+        else
+          raise Exe32Rb::ExecutionError,
+                "unsupported machine #{PE::Constants.machine_name(@image.machine)}"
+        end
+      end
+
+      def halted?
+        @halted
+      end
+
+      def step
+        rip = @cpu.rip
+        if rip == @halt_sentinel
+          @halted = true
+          @exit_code ||= @cpu.registers.read32(Registers::RAX)
+          return :halt
+        end
+
+        if @dispatcher.thunk?(rip)
+          imp = @dispatcher.thunks[rip]
+          trace_api(imp) if @trace
+          @dispatcher.invoke(rip, self)
+          return :api
+        end
+
+        instr = @decoder.decode(rip)
+        trace_instr(instr) if @trace
+        @cpu.rip = (rip + instr.length) & @cpu.address_mask
+        @executor.execute(instr)
+        @steps_executed += 1
+        :step
+      rescue Executor::HaltSignal => e
+        @halted = true
+        @exit_code = e.exit_code
+        :halt
+      end
+
+      def run(max_steps: 10_000_000)
+        until @halted
+          step
+          if @steps_executed >= max_steps
+            raise Exe32Rb::ExecutionError,
+                  "machine ran for #{max_steps} steps without halting (rip=0x#{@cpu.rip.to_s(16)})"
+          end
+        end
+        @exit_code
+      rescue Exe32Rb::MemoryError => e
+        $stderr.puts "\n--- fault ---"
+        $stderr.puts e.message
+        $stderr.puts "  rip = 0x#{@cpu.rip.to_s(16)}"
+        $stderr.puts "  rsp = 0x#{@cpu.rsp.to_s(16)}"
+        $stderr.puts "  steps = #{@steps_executed}"
+        $stderr.puts @cpu.registers.to_s.lines.map { |l| "  #{l}" }.join
+        raise
+      end
+
+      # Reserve a small scratch buffer and write a C-style string. Returns
+      # the guest pointer.
+      def scratch_strz(text)
+        bytes = "#{text}\x00".b
+        scratch_emit(bytes)
+      end
+
+      # UTF-16LE C-style string (LPCWSTR).
+      def scratch_strz_w(text)
+        bytes = +"".b
+        text.each_codepoint do |cp|
+          bytes << [cp & 0xFFFF].pack("v")
+        end
+        bytes << "\x00\x00".b
+        scratch_emit(bytes)
+      end
+
+      # Bump-allocate `size` bytes of scratch; returns the guest pointer.
+      def scratch_alloc(size, zero: false)
+        return 0 if size <= 0
+
+        size = (size + 0xF) & ~0xF # 16-byte align
+        addr = @scratch_cursor
+        @scratch_cursor += size
+        @memory.write(addr, "\x00".b * size) if zero
+        addr
+      end
+
+      def scratch_emit(bytes)
+        addr = @scratch_cursor
+        @memory.write(addr, bytes)
+        @scratch_cursor += bytes.bytesize
+        addr
+      end
+
+      # ----------------------------------------------------------------
+      # Host-backed handles
+      # ----------------------------------------------------------------
+
+      # Hand the guest a synthetic 32-bit handle that maps back to a host
+      # IO object (a File, $stdin/$stdout, or anything that responds to the
+      # usual IO API).
+      def register_handle(io)
+        handle = @next_handle
+        @next_handle += 1
+        @handles[handle] = io
+        handle
+      end
+
+      def lookup_handle(handle)
+        @handles[handle]
+      end
+
+      def close_handle(handle)
+        io = @handles.delete(handle)
+        return false unless io
+
+        begin
+          io.close unless io.closed?
+        rescue IOError, Errno::EBADF
+          # already closed; nothing to do
+        end
+        true
+      end
+
+      # ----------------------------------------------------------------
+      # Guest-string readers
+      # ----------------------------------------------------------------
+
+      # Read a UTF-16LE C string from guest memory and return a UTF-8 String.
+      def read_wstring(addr)
+        return "" if addr.nil? || addr == 0
+
+        bytes = +"".b
+        pos = addr
+        loop do
+          pair = @memory.read(pos, 2)
+          break if pair == "\x00\x00".b
+
+          bytes << pair
+          pos += 2
+        end
+        bytes.force_encoding(Encoding::UTF_16LE).encode(Encoding::UTF_8)
+      end
+
+      # Read an ASCII C string from guest memory.
+      def read_cstring(addr)
+        return "" if addr.nil? || addr == 0
+
+        bytes = +"".b
+        pos = addr
+        loop do
+          b = @memory.read_u8(pos)
+          break if b == 0
+
+          bytes << b.chr.b
+          pos += 1
+        end
+        bytes
+      end
+
+      private
+
+      def map_image
+        # Headers region (everything up to first section's RVA). We round up
+        # to a page so subsequent section maps don't collide.
+        header_size = align_to_page(@image.size_of_headers)
+        @memory.map(@image.image_base, header_size,
+                    permissions: Memory::PERM_R, name: "headers")
+
+        # We need the original file bytes for the headers in case code reads
+        # them at runtime (rare, but harmless).
+        header_bytes = File.binread(@image.path, @image.size_of_headers)
+        @memory.write(@image.image_base, header_bytes)
+
+        @image.sections.each do |section|
+          perm = 0
+          perm |= Memory::PERM_R if section.readable?
+          perm |= Memory::PERM_W if section.writable?
+          perm |= Memory::PERM_X if section.executable?
+          perm = Memory::PERM_R if perm == 0
+
+          vsize = [section.virtual_size, section.size_of_raw_data].max
+          next if vsize == 0
+
+          base = @image.image_base + section.virtual_address
+          @memory.map(base, align_to_page(vsize), permissions: perm, name: section.name)
+          @memory.write(base, section.raw_data) unless section.raw_data.empty?
+        end
+      end
+
+      def map_stack
+        @memory.map(@stack_base, STACK_SIZE,
+                    permissions: Memory::PERM_RW, name: "stack")
+        # Leave a little headroom and align to 16 (ABI alignment for calls).
+        @cpu.rsp = (@stack_base + STACK_SIZE - 0x100) & ~0xF
+      end
+
+      def map_scratch
+        @memory.map(@scratch_base, SCRATCH_SIZE,
+                    permissions: Memory::PERM_RW, name: "scratch")
+      end
+
+      # Minimal Thread Information Block — enough for compiler-emitted FS:[...]
+      # accesses (SEH chain at offset 0, self pointer, stack limits) to read
+      # plausible values instead of crashing on address 0.
+      def map_tib
+        tib_base = @mode == 32 ? TIB_BASE_32 : TIB_BASE_64
+        @memory.map(tib_base, TIB_SIZE, permissions: Memory::PERM_RW, name: "tib")
+
+        # TIB page layout (offsets within the 4 KiB region):
+        #   0x000..0x100   real TIB fields (SEH, stack, self, ids, TLS, PEB ptr)
+        #   0x100..0x500   TlsSlots — pointer array of TLS data per slot
+        #   0x500..0x800   TLS data — shared zero region every slot points to
+        #   0x800..0x1000  PEB (zero-filled stub)
+        tls_array_offset = 0x100
+        tls_data_offset  = 0x500
+        tls_data_addr    = tib_base + tls_data_offset
+
+        if @mode == 32
+          @cpu.fs_base = tib_base
+          @memory.write_u32(tib_base + 0x00, 0xFFFF_FFFF)             # ExceptionList: no handler
+          @memory.write_u32(tib_base + 0x04, @stack_base + STACK_SIZE) # StackBase
+          @memory.write_u32(tib_base + 0x08, @stack_base)              # StackLimit
+          @memory.write_u32(tib_base + 0x18, tib_base)                 # Self
+          @memory.write_u32(tib_base + 0x20, 1)                        # ProcessId
+          @memory.write_u32(tib_base + 0x24, 1)                        # ThreadId
+          @memory.write_u32(tib_base + 0x2C, tib_base + tls_array_offset) # TlsSlots
+          @memory.write_u32(tib_base + 0x30, tib_base + 0x800)         # PEB
+
+          # Point every TLS slot at the shared zero region. Static-TLS readers
+          # do `mov edx, fs:[0x2C]; mov eax, [edx + N*4]; mov ..., [eax]` —
+          # this makes the final deref land on mapped (zero) memory.
+          256.times do |i|
+            @memory.write_u32(tib_base + tls_array_offset + i * 4, tls_data_addr)
+          end
+        else
+          @cpu.gs_base = tib_base
+          @memory.write_u64(tib_base + 0x00, 0xFFFF_FFFF_FFFF_FFFF)
+          @memory.write_u64(tib_base + 0x08, @stack_base + STACK_SIZE)
+          @memory.write_u64(tib_base + 0x10, @stack_base)
+          @memory.write_u64(tib_base + 0x30, tib_base)
+          @memory.write_u64(tib_base + 0x58, tib_base + tls_array_offset) # TlsSlots
+          @memory.write_u64(tib_base + 0x60, tib_base + 0x800)
+          64.times do |i|
+            @memory.write_u64(tib_base + tls_array_offset + i * 8, tls_data_addr)
+          end
+        end
+      end
+
+      def seed_initial_state
+        @cpu.rip = @image.entry_point
+        # Push a sentinel return address. If entry's RET ever fires, RIP
+        # becomes this and the step loop halts gracefully.
+        @cpu.push_native(@memory, @halt_sentinel)
+      end
+
+      def align_to_page(size)
+        (size + Memory::PAGE_MASK) & ~Memory::PAGE_MASK
+      end
+
+      def trace_instr(instr)
+        warn instr.to_s
+      end
+
+      def trace_api(imp)
+        warn format("              => %s", imp.display_name)
+      end
+    end
+  end
+end
