@@ -248,10 +248,134 @@ module Exe32Rb
         dispatcher.install_handler("kernel32.dll", "LockResource", args: 1) { |_, args| args[0] }
 
         dispatcher.install_handler("kernel32.dll", "DeleteFileW", args: 1) do |machine, args|
-          File.delete(Api::WinFS.translate(machine.fs_root, machine.read_wstring(args[0])))
+          path = machine.read_wstring(args[0]) rescue ""
+          host = Api::WinFS.translate(machine.fs_root, path) rescue path
+          # If the file is under our WinFS sandbox, preserve it instead
+          # of deleting — installers tend to cleanup-then-relaunch their
+          # extracted .tmp and we want to keep that around for re-running.
+          # Set EXE32_RB_REAL_DELETE=1 to opt back into real deletion.
+          if ENV["EXE32_RB_REAL_DELETE"] == "1"
+            begin
+              File.delete(host)
+              1
+            rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
+              0
+            end
+          else
+            warn "[DeleteFileW] (sandbox: kept) #{host}"
+            1
+          end
+        end
+
+        dispatcher.install_handler("kernel32.dll", "DeleteFileA", args: 1) do |machine, args|
+          path = machine.read_cstring(args[0]) rescue ""
+          host = Api::WinFS.translate(machine.fs_root, path) rescue path
+          if ENV["EXE32_RB_REAL_DELETE"] == "1"
+            begin
+              File.delete(host)
+              1
+            rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
+              0
+            end
+          else
+            warn "[DeleteFileA] (sandbox: kept) #{host}"
+            1
+          end
+        end
+
+        dispatcher.install_handler("kernel32.dll", "RemoveDirectoryW", args: 1) do |machine, args|
+          path = machine.read_wstring(args[0]) rescue ""
+          host = Api::WinFS.translate(machine.fs_root, path) rescue path
+          warn "[RemoveDirectoryW] (sandbox: kept) #{host}"
           1
-        rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
-          0
+        end
+
+        # Memory-mapped file APIs. Some installers extract a payload by
+        # writing it to the mapped view, then UnmapViewOfFile flushes it
+        # to disk. Our impl is simple: track which handle maps which
+        # file, on map create a scratch buffer + remember the file
+        # handle; on unmap write the buffer back to the file.
+        file_maps = {}            # mapping_handle => { file_handle:, size:, base: }
+        view_to_mapping = {}      # base_addr => mapping_handle
+        next_mapping = 0x6000_0001
+        dispatcher.install_handler("kernel32.dll", "CreateFileMappingW", args: 6) do |machine, args|
+          hFile = args[0] & 0xFFFF_FFFF
+          # args[3] = dwMaximumSizeHigh, args[4] = dwMaximumSizeLow
+          size = (args[4] & 0xFFFF_FFFF) | ((args[3] & 0xFFFF_FFFF) << 32)
+          if size == 0 && hFile != 0xFFFF_FFFF
+            io = machine.lookup_handle(hFile)
+            size = io ? io.size : 0
+          end
+          h = next_mapping; next_mapping += 1
+          file_maps[h] = { file_handle: hFile, size: size, base: nil }
+          h
+        end
+        dispatcher.install_handler("kernel32.dll", "CreateFileMappingA", args: 6) do |machine, args|
+          # Same as W
+          hFile = args[0] & 0xFFFF_FFFF
+          size = (args[4] & 0xFFFF_FFFF) | ((args[3] & 0xFFFF_FFFF) << 32)
+          if size == 0 && hFile != 0xFFFF_FFFF
+            io = machine.lookup_handle(hFile)
+            size = io ? io.size : 0
+          end
+          h = next_mapping; next_mapping += 1
+          file_maps[h] = { file_handle: hFile, size: size, base: nil }
+          h
+        end
+        dispatcher.install_handler("kernel32.dll", "MapViewOfFile", args: 5) do |machine, args|
+          h = args[0] & 0xFFFF_FFFF
+          info = file_maps[h]
+          next 0 unless info
+          # Allocate scratch sized to the mapping; if the file has data,
+          # pre-load it into the buffer so reads see the file contents.
+          base = machine.scratch_alloc(info[:size], zero: true)
+          io = machine.lookup_handle(info[:file_handle])
+          if io && info[:size] > 0
+            begin
+              io.rewind
+              data = io.read(info[:size]) || +"".b
+              machine.memory.write(base, data) unless data.empty?
+            rescue IOError
+              # leave zeroed
+            end
+          end
+          info[:base] = base
+          view_to_mapping[base] = h
+          base
+        end
+        dispatcher.install_handler("kernel32.dll", "UnmapViewOfFile", args: 1) do |machine, args|
+          base = args[0] & 0xFFFF_FFFF
+          h = view_to_mapping.delete(base)
+          info = file_maps[h] if h
+          if info
+            io = machine.lookup_handle(info[:file_handle])
+            if io && info[:size] > 0
+              begin
+                io.rewind
+                io.write(machine.memory.read(base, info[:size]))
+                io.flush
+              rescue IOError
+              end
+            end
+          end
+          1
+        end
+        dispatcher.install_handler("kernel32.dll", "FlushViewOfFile", args: 2) do |machine, args|
+          base = args[0] & 0xFFFF_FFFF
+          h = view_to_mapping[base]
+          info = file_maps[h] if h
+          if info
+            io = machine.lookup_handle(info[:file_handle])
+            if io && info[:size] > 0
+              begin
+                io.rewind
+                io.write(machine.memory.read(base, info[:size]))
+                io.flush
+              rescue IOError
+              end
+            end
+          end
+          1
         end
 
         dispatcher.install_handler("kernel32.dll", "GetFileAttributesW", args: 1) do |machine, args|
