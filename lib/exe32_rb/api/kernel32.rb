@@ -601,9 +601,7 @@ module Exe32Rb
 
         # Misc.
         dispatcher.install_handler("kernel32.dll", "GetCommandLineW", args: 0) do |machine, _|
-          # Provide /SILENT so installer-style binaries skip GUI dialogs and
-          # use their non-interactive code path.
-          machine.scratch_strz_w("\"#{machine.image.path}\" /SILENT /SUPPRESSMSGBOXES /NOCANCEL")
+          machine.scratch_strz_w("\"#{machine.image.path}\"")
         end
 
         # Environment variables — return sensible host paths for TEMP-ish ones.
