@@ -316,12 +316,20 @@ module Exe32Rb
       def write_f32(addr, v); @memory.write(addr, [v].pack("e")); end
       def write_f64(addr, v); @memory.write(addr, [v].pack("E")); end
 
-      # Memory loads (push onto FPU stack)
+      # Memory loads (push onto FPU stack).
+      #
+      # FILD pushes an Integer (NOT a Float) so 64-bit values round-trip
+      # losslessly through FISTP. A 64-bit int has 64 bits of precision;
+      # IEEE 754 double has 53. Delphi RTL uses FILD m64 / FISTP m64 as a
+      # fast 8-byte memcpy primitive — converting through Float would
+      # round the low 2 bits to nearest multiple of 4 (banker's rounding),
+      # corrupting every 4th byte of UTF-16 strings copied this way.
+      # Storing Integers preserves the exact bit pattern.
       def op_fld_m32(instr);  fpu.push(read_f32(effective_address(instr.operands[0]))); end
       def op_fld_m64(instr);  fpu.push(read_f64(effective_address(instr.operands[0]))); end
-      def op_fild_m32(instr); fpu.push(signed_of(@memory.read_u32(effective_address(instr.operands[0])), 32).to_f); end
-      def op_fild_m64(instr); fpu.push(signed_of(@memory.read_u64(effective_address(instr.operands[0])), 64).to_f); end
-      def op_fild_m16(instr); fpu.push(signed_of(@memory.read_u16(effective_address(instr.operands[0])), 16).to_f); end
+      def op_fild_m32(instr); fpu.push(signed_of(@memory.read_u32(effective_address(instr.operands[0])), 32)); end
+      def op_fild_m64(instr); fpu.push(signed_of(@memory.read_u64(effective_address(instr.operands[0])), 64)); end
+      def op_fild_m16(instr); fpu.push(signed_of(@memory.read_u16(effective_address(instr.operands[0])), 16)); end
 
       # Memory stores
       def op_fst_m32(instr);  write_f32(effective_address(instr.operands[0]), fpu.st(0)); end
@@ -329,12 +337,17 @@ module Exe32Rb
       def op_fstp_m32(instr); write_f32(effective_address(instr.operands[0]), fpu.st(0)); fpu.pop; end
       def op_fstp_m64(instr); write_f64(effective_address(instr.operands[0]), fpu.st(0)); fpu.pop; end
 
-      # Integer stores
-      def op_fist_m32(instr);  @memory.write_u32(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF); end
-      def op_fistp_m32(instr); @memory.write_u32(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF); fpu.pop; end
-      def op_fist_m16(instr);  @memory.write_u16(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF); end
-      def op_fistp_m16(instr); @memory.write_u16(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF); fpu.pop; end
-      def op_fistp_m64(instr); @memory.write_u64(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF_FFFF_FFFF); fpu.pop; end
+      # Integer stores — use exact_to_i to preserve full 64-bit precision
+      # when the value is still an Integer (loaded via FILD). For Floats
+      # we round per the FPU's current rounding mode (we approximate with
+      # plain .to_i = round toward zero; real x87 honors the control word).
+      def exact_to_i(v); v.is_a?(Integer) ? v : v.to_i; end
+
+      def op_fist_m32(instr);  @memory.write_u32(effective_address(instr.operands[0]), exact_to_i(fpu.st(0)) & 0xFFFF_FFFF); end
+      def op_fistp_m32(instr); @memory.write_u32(effective_address(instr.operands[0]), exact_to_i(fpu.st(0)) & 0xFFFF_FFFF); fpu.pop; end
+      def op_fist_m16(instr);  @memory.write_u16(effective_address(instr.operands[0]), exact_to_i(fpu.st(0)) & 0xFFFF); end
+      def op_fistp_m16(instr); @memory.write_u16(effective_address(instr.operands[0]), exact_to_i(fpu.st(0)) & 0xFFFF); fpu.pop; end
+      def op_fistp_m64(instr); @memory.write_u64(effective_address(instr.operands[0]), exact_to_i(fpu.st(0)) & 0xFFFF_FFFF_FFFF_FFFF); fpu.pop; end
 
       # Arithmetic with memory (m32 / m64)
       def op_fadd_m32(instr); fpu.set_st(0, fpu.st(0) + read_f32(effective_address(instr.operands[0]))); end
