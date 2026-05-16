@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "optparse"
+require "set"
 
 module Exe32Rb
   # Command-line frontend for the i386 / PE32 emulator. Rejects PE32+
@@ -29,6 +30,7 @@ module Exe32Rb
         --patch=ADDR=HEX             overwrite guest memory at ADDR with HEX bytes
                                      e.g. --patch=0x401C7C=33C0C3   (repeatable)
         --watch=ADDR                 log every write that touches ADDR (repeatable)
+        --break=ADDR                 log register state when EIP hits ADDR (repeatable)
         --delphi-memmgr=ADDR         replace the Delphi TMemoryManager record at ADDR
                                      with Ruby handlers (GetMem/FreeMem/Realloc...)
                                      e.g. --delphi-memmgr=0x41273C for Akimbo
@@ -95,6 +97,7 @@ module Exe32Rb
           opts[:patches] << [Integer(addr_str), [hex].pack("H*")]
         end
         o.on("--watch=ADDR", String) { |s| (opts[:watches] ||= []) << Integer(s) }
+        o.on("--break=ADDR", String) { |s| (opts[:breaks]  ||= []) << Integer(s) }
         o.on("--delphi-memmgr=ADDR", String) { |s| opts[:delphi_memmgr] = Integer(s) }
         o.on("--winfs[=DIR]", String) { |s| opts[:winfs] = s || :default }
         o.on("--lenient") { opts[:lenient] = true }
@@ -108,6 +111,7 @@ module Exe32Rb
       install_call_stubs(machine, opts[:call_stubs])
       apply_patches(machine, opts[:patches])
       install_watchpoints(machine, opts[:watches] || [])
+      install_breakpoints(machine, opts[:breaks] || [])
       if opts[:delphi_memmgr]
         require "exe32_rb/api/delphi_memmgr"
         Exe32Rb::Api::DelphiMemMgr.install(machine, opts[:delphi_memmgr])
@@ -125,6 +129,27 @@ module Exe32Rb
       kw[:max_steps] = opts[:max_steps] if opts[:max_steps]
       machine.run(**kw)
       [(machine.exit_code || 0) & 0xFF, 255].min
+    end
+
+    # Instruction breakpoints — log register state every time EIP hits ADDR.
+    # Wrap Machine#step so we get a per-tick check before the decoder runs.
+    def install_breakpoints(machine, addresses)
+      return if addresses.empty?
+
+      addr_set = Set.new(addresses)
+      hits = Hash.new(0)
+      original_step = machine.method(:step)
+      machine.define_singleton_method(:step) do
+        rip = cpu.rip
+        if addr_set.include?(rip)
+          hits[rip] += 1
+          r = cpu.registers
+          warn format("[break] 0x%08X hit=%d  eax=0x%08X ebx=0x%08X ecx=0x%08X edx=0x%08X esi=0x%08X edi=0x%08X ebp=0x%08X esp=0x%08X",
+                       rip, hits[rip], r.read32(0), r.read32(3), r.read32(1),
+                       r.read32(2), r.read32(6), r.read32(7), r.read32(5), r.read32(4))
+        end
+        original_step.call
+      end
     end
 
     # Memory watchpoints: log every write that intersects a watched address.

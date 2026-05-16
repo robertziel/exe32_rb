@@ -115,6 +115,25 @@ module Exe32Rb
         # this lambda exists for API symmetry.
         ret
       end
+
+      # Build a Delphi UnicodeString in scratch and return its pointer.
+      # Layout: [ptr-12]=codepage+charsize, [ptr-8]=refcount(-1=const),
+      #         [ptr-4]=length, [ptr..]=UTF-16 data, [ptr+length*2]=null.
+      def self.make_unicode_string(machine, text)
+        codepage_field = (1200 & 0xFFFF) | (2 << 16)       # 1200=UTF-16LE, charsize=2
+        encoded = +"".b
+        text.each_codepoint { |c| encoded << [c & 0xFFFF].pack("v") }
+        total = 12 + encoded.bytesize + 2
+        base = machine.scratch_alloc(total, zero: true)
+        return 0 if base == 0
+
+        ret = base + 12
+        machine.memory.write_u32(ret - 12, codepage_field)
+        machine.memory.write_u32(ret - 8, -1 & 0xFFFF_FFFF) # refcount = -1 (constant)
+        machine.memory.write_u32(ret - 4, text.length)
+        machine.memory.write(ret, encoded)
+        ret
+      end
     end
   end
 end
