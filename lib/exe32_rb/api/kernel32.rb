@@ -142,10 +142,55 @@ module Exe32Rb
           next 0xFFFF_FFFF unless io
 
           begin
-            io.size & 0xFFFF_FFFF
+            size = io.size
+            # Write the high DWORD if the caller passed a pointer.
+            high_p = args[1] & 0xFFFF_FFFF
+            machine.memory.write_u32(high_p, (size >> 32) & 0xFFFF_FFFF) if high_p != 0
+            size & 0xFFFF_FFFF
           rescue IOError
             0xFFFF_FFFF
           end
+        end
+
+        # SetEndOfFile — truncate or extend the file to the current position.
+        # InnoSetup-style installers often pre-allocate the .tmp by seeking
+        # to the target size then calling SetEndOfFile, before writing.
+        dispatcher.install_handler("kernel32.dll", "SetEndOfFile", args: 1) do |machine, args|
+          io = machine.lookup_handle(args[0])
+          next 0 unless io
+          begin
+            io.truncate(io.pos)
+            1
+          rescue IOError, Errno::EINVAL, Errno::EBADF
+            0
+          end
+        end
+
+        # FlushFileBuffers — Ruby's File#flush + #fsync.
+        dispatcher.install_handler("kernel32.dll", "FlushFileBuffers", args: 1) do |machine, args|
+          io = machine.lookup_handle(args[0])
+          next 0 unless io
+          io.flush rescue nil
+          io.fsync rescue nil
+          1
+        end
+
+        # GetFileType — disk file (1). Console/pipe paths not modeled.
+        dispatcher.install_handler("kernel32.dll", "GetFileType", args: 1) do |_machine, _args|
+          1 # FILE_TYPE_DISK
+        end
+
+        # GetFileAttributesW — return FILE_ATTRIBUTE_NORMAL (0x80) or
+        # 0xFFFFFFFF for missing. Used by installers to test existence.
+        dispatcher.install_handler("kernel32.dll", "GetFileAttributesW", args: 1) do |machine, args|
+          path = machine.read_wstring(args[0])
+          translated = Api::WinFS.translate(machine.fs_root, path)
+          File.exist?(translated) ? 0x80 : 0xFFFF_FFFF
+        end
+        dispatcher.install_handler("kernel32.dll", "GetFileAttributesA", args: 1) do |machine, args|
+          path = machine.read_cstring(args[0])
+          translated = Api::WinFS.translate(machine.fs_root, path)
+          File.exist?(translated) ? 0x80 : 0xFFFF_FFFF
         end
 
         # FindResource* walks the parsed .rsrc tree. We return the
