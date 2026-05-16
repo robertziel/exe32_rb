@@ -584,6 +584,34 @@ module Exe32Rb
           dispatcher.install_handler("kernel32.dll", fn, args: n_args) { |_, _| 1 }
         end
 
+        # Interlocked* — proper read-modify-write semantics on guest memory.
+        # Single-threaded so atomicity is free; correctness matters because
+        # Delphi RTL & FastMM use the return value (old value) for state.
+        dispatcher.install_handler("kernel32.dll", "InterlockedExchange", args: 2) do |machine, args|
+          ptr, val = args[0] & 0xFFFF_FFFF, args[1] & 0xFFFF_FFFF
+          old = machine.memory.read_u32(ptr)
+          machine.memory.write_u32(ptr, val)
+          old
+        end
+        dispatcher.install_handler("kernel32.dll", "InterlockedCompareExchange", args: 3) do |machine, args|
+          ptr, val, cmp = args[0] & 0xFFFF_FFFF, args[1] & 0xFFFF_FFFF, args[2] & 0xFFFF_FFFF
+          old = machine.memory.read_u32(ptr)
+          machine.memory.write_u32(ptr, val) if old == cmp
+          old
+        end
+        dispatcher.install_handler("kernel32.dll", "InterlockedIncrement", args: 1) do |machine, args|
+          ptr = args[0] & 0xFFFF_FFFF
+          new = (machine.memory.read_u32(ptr) + 1) & 0xFFFF_FFFF
+          machine.memory.write_u32(ptr, new)
+          new
+        end
+        dispatcher.install_handler("kernel32.dll", "InterlockedDecrement", args: 1) do |machine, args|
+          ptr = args[0] & 0xFFFF_FFFF
+          new = (machine.memory.read_u32(ptr) - 1) & 0xFFFF_FFFF
+          machine.memory.write_u32(ptr, new)
+          new
+        end
+
         # TLS — return distinct slot indices and store per-thread (single
         # thread, so a flat hash works).
         tls_next = 0
