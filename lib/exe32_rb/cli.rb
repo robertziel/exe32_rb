@@ -28,6 +28,7 @@ module Exe32Rb
                                      e.g. --call-stub=0x412740=0  (repeatable)
         --patch=ADDR=HEX             overwrite guest memory at ADDR with HEX bytes
                                      e.g. --patch=0x401C7C=33C0C3   (repeatable)
+        --watch=ADDR                 log every write that touches ADDR (repeatable)
         --lenient                    unmapped reads return 0, writes are dropped
                                      (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
@@ -87,6 +88,7 @@ module Exe32Rb
           addr_str, hex = s.split("=", 2)
           opts[:patches] << [Integer(addr_str), [hex].pack("H*")]
         end
+        o.on("--watch=ADDR", String) { |s| (opts[:watches] ||= []) << Integer(s) }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -97,11 +99,37 @@ module Exe32Rb
       install_stub_missing(machine) if opts[:stub_missing]
       install_call_stubs(machine, opts[:call_stubs])
       apply_patches(machine, opts[:patches])
+      install_watchpoints(machine, opts[:watches] || [])
 
       kw = {}
       kw[:max_steps] = opts[:max_steps] if opts[:max_steps]
       machine.run(**kw)
       [(machine.exit_code || 0) & 0xFF, 255].min
+    end
+
+    # Memory watchpoints: log every write that intersects a watched address.
+    # We hook Memory#write_callback (already exists for icache invalidation)
+    # and report addr + the new value + current rip.
+    def install_watchpoints(machine, addresses)
+      return if addresses.empty?
+
+      addresses.each { |a| warn format("[watch] 0x%08X", a) }
+      previous = machine.memory.write_callback
+      machine.memory.write_callback = lambda do |addr, size|
+        previous&.call(addr, size)
+        addresses.each do |watch|
+          if watch >= addr && watch < addr + size
+            new = machine.memory.read_u32(watch & ~3)
+            r = machine.cpu.registers
+            warn format("[watch] 0x%08X <- 0x%08X  (rip=0x%08X step=%d)\n" \
+                        "                          eax=0x%08X ebx=0x%08X ecx=0x%08X edx=0x%08X\n" \
+                        "                          esi=0x%08X edi=0x%08X ebp=0x%08X esp=0x%08X",
+                         watch, new, machine.cpu.rip, machine.steps_executed,
+                         r.read32(0), r.read32(3), r.read32(1), r.read32(2),
+                         r.read32(6), r.read32(7), r.read32(5), r.read32(4))
+          end
+        end
+      end
     end
 
     def apply_patches(machine, patches)
