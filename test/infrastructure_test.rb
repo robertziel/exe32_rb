@@ -250,7 +250,90 @@ class InfrastructureTest < Minitest::Test
     assert_equal [[0x10010, 4], [0x10020, 1]], events
   end
 
+  # ----------------------------------------------------------------
+  # Interlocked* read-modify-write APIs
+  # ----------------------------------------------------------------
+
+  def test_interlocked_exchange_swaps_and_returns_old
+    require "exe32_rb/api/kernel32"
+    machine = build_kernel32_machine
+    addr = 0x10100
+    machine.memory.write_u32(addr, 0x1234_5678)
+
+    result = invoke_api(machine, "InterlockedExchange", [addr, 0xABCD_0001])
+    assert_equal 0x1234_5678, result, "should return OLD value"
+    assert_equal 0xABCD_0001, machine.memory.read_u32(addr)
+  end
+
+  def test_interlocked_compare_exchange_swaps_only_on_match
+    require "exe32_rb/api/kernel32"
+    machine = build_kernel32_machine
+    addr = 0x10200
+    machine.memory.write_u32(addr, 0x100)
+
+    # Match: swap happens, return old (0x100)
+    r1 = invoke_api(machine, "InterlockedCompareExchange",
+                    [addr, 0x200, 0x100])
+    assert_equal 0x100, r1
+    assert_equal 0x200, machine.memory.read_u32(addr)
+
+    # Mismatch: no swap, returns current
+    r2 = invoke_api(machine, "InterlockedCompareExchange",
+                    [addr, 0x999, 0x000])
+    assert_equal 0x200, r2
+    assert_equal 0x200, machine.memory.read_u32(addr)
+  end
+
+  def test_interlocked_increment_and_decrement
+    require "exe32_rb/api/kernel32"
+    machine = build_kernel32_machine
+    addr = 0x10300
+    machine.memory.write_u32(addr, 0x10)
+
+    assert_equal 0x11, invoke_api(machine, "InterlockedIncrement", [addr])
+    assert_equal 0x11, machine.memory.read_u32(addr)
+    assert_equal 0x10, invoke_api(machine, "InterlockedDecrement", [addr])
+    assert_equal 0x10, machine.memory.read_u32(addr)
+  end
+
+  def test_create_process_w_populates_process_information
+    require "exe32_rb/api/kernel32"
+    machine = build_kernel32_machine
+    pi_addr = 0x10400
+    16.times { |i| machine.memory.write_u8(pi_addr + i, 0) }
+
+    # CreateProcessW has 10 args; args[9] is lpProcessInformation
+    args = [0, 0, 0, 0, 0, 0, 0, 0, 0, pi_addr]
+    capture_io { invoke_api(machine, "CreateProcessW", args) }
+
+    assert_equal 0x7000_0001, machine.memory.read_u32(pi_addr +  0), "hProcess"
+    assert_equal 0x7000_0002, machine.memory.read_u32(pi_addr +  4), "hThread"
+    assert_equal 0x1234,      machine.memory.read_u32(pi_addr +  8), "dwPid"
+    assert_equal 0x5678,      machine.memory.read_u32(pi_addr + 12), "dwTid"
+  end
+
   private
+
+  # Build a real Machine on a tiny synthetic image with kernel32
+  # handlers installed and the dispatcher's missing-handler returning
+  # nil. Used by the Interlocked* / CreateProcess tests.
+  def build_kernel32_machine
+    machine = Exe32Rb::Emulator::Machine.new(synth_image).configure
+    machine.dispatcher.install_missing_handler(args: 0) { nil }
+    machine.memory.map(0x10000 & ~0xFFF, 0x2000, name: "test-scratch")
+    machine
+  end
+
+  # Look up a handler by kernel32!<name> key and invoke it with `args`,
+  # bypassing convention.read_args/cleanup — handlers receive an args
+  # array directly, so we just hand it through.
+  def invoke_api(machine, name, args)
+    # Dispatcher#key lowercases dll but keeps name as-is.
+    key = "kernel32.dll!#{name}"
+    entry = machine.dispatcher.instance_variable_get(:@handlers)[key] or
+      raise "no handler installed for #{name}"
+    entry.handler.call(machine, args)
+  end
 
   # Build a Machine-like fake exposing just .cpu and .registers for
   # convention tests, without going through the real configure() path
