@@ -29,6 +29,9 @@ module Exe32Rb
         --patch=ADDR=HEX             overwrite guest memory at ADDR with HEX bytes
                                      e.g. --patch=0x401C7C=33C0C3   (repeatable)
         --watch=ADDR                 log every write that touches ADDR (repeatable)
+        --delphi-memmgr=ADDR         replace the Delphi TMemoryManager record at ADDR
+                                     with Ruby handlers (GetMem/FreeMem/Realloc...)
+                                     e.g. --delphi-memmgr=0x41273C for Akimbo
         --lenient                    unmapped reads return 0, writes are dropped
                                      (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
@@ -89,6 +92,7 @@ module Exe32Rb
           opts[:patches] << [Integer(addr_str), [hex].pack("H*")]
         end
         o.on("--watch=ADDR", String) { |s| (opts[:watches] ||= []) << Integer(s) }
+        o.on("--delphi-memmgr=ADDR", String) { |s| opts[:delphi_memmgr] = Integer(s) }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -100,6 +104,10 @@ module Exe32Rb
       install_call_stubs(machine, opts[:call_stubs])
       apply_patches(machine, opts[:patches])
       install_watchpoints(machine, opts[:watches] || [])
+      if opts[:delphi_memmgr]
+        require "exe32_rb/api/delphi_memmgr"
+        Exe32Rb::Api::DelphiMemMgr.install(machine, opts[:delphi_memmgr])
+      end
 
       kw = {}
       kw[:max_steps] = opts[:max_steps] if opts[:max_steps]

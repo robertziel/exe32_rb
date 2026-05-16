@@ -68,6 +68,29 @@ module Exe32Rb
           machine.cpu.rip = ret
         end
       end
+
+      # Delphi's "register" (Borland fastcall) calling convention.
+      # First three integer args go in EAX, EDX, ECX; return value in EAX.
+      # Caller's responsibility for stack args (if any) — we only model 1-3.
+      class DelphiRegister
+        def read_args(machine, n)
+          regs = machine.cpu.registers
+          [regs.read32(Emulator::Registers::RAX),
+           regs.read32(Emulator::Registers::RDX),
+           regs.read32(Emulator::Registers::RCX)].first(n)
+        end
+
+        def return_value(machine, value)
+          machine.cpu.registers.write32(Emulator::Registers::RAX, value & 0xFFFF_FFFF)
+        end
+
+        def cleanup(machine, _arg_count)
+          esp = machine.cpu.registers.read32(Emulator::Registers::RSP)
+          ret = machine.memory.read_u32(esp)
+          machine.cpu.registers.write32(Emulator::Registers::RSP, esp + 4)
+          machine.cpu.rip = ret
+        end
+      end
     end
   end
 end

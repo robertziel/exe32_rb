@@ -209,6 +209,23 @@ module Exe32Rb
           end
         end
 
+        dispatcher.install_handler("kernel32.dll", "CreateDirectoryW", args: 2) do |machine, args|
+          path = machine.read_wstring(args[0])
+          warn format("[CreateDirectoryW] %s", path.inspect)
+          Dir.mkdir(path)
+          1
+        rescue Errno::EEXIST
+          1 # already exists — treat as success for installers
+        rescue Errno::ENOENT, Errno::EACCES
+          0
+        end
+
+        dispatcher.install_handler("kernel32.dll", "FindFirstFileW", args: 2) do |machine, args|
+          path = machine.read_wstring(args[0])
+          warn format("[FindFirstFileW] %s", path.inspect)
+          0xFFFF_FFFF # INVALID_HANDLE_VALUE — no matches (we have an empty fs)
+        end
+
         dispatcher.install_handler("kernel32.dll", "ExitProcess", args: 1) do |_machine, args|
           raise Emulator::Executor::HaltSignal.new(args[0] & 0xFFFF_FFFF)
         end
@@ -404,10 +421,18 @@ module Exe32Rb
           end
         end
 
+        # Tick counter that actually advances — InnoSetup uses GetTickCount as
+        # entropy for temp directory names ("is-NNN.tmp"). Returning a fixed
+        # value gives the same path every time and breaks file-existence checks.
+        tick = 0x1000
+        dispatcher.install_handler("kernel32.dll", "GetTickCount", args: 0) do |_, _|
+          tick += 1
+          tick
+        end
+
         dispatcher.install_handler("kernel32.dll", "GetVersion",         args: 0) { |_, _| 0x0023_0A00 } # Win10 6.0 build 10 form
         dispatcher.install_handler("kernel32.dll", "GetVersionExA",      args: 1) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "GetVersionExW",      args: 1) { |_, _| 1 }
-        dispatcher.install_handler("kernel32.dll", "GetTickCount",       args: 0) { |_, _| 0 }
         dispatcher.install_handler("kernel32.dll", "GetCurrentProcess",  args: 0) { |_, _| 0xFFFF_FFFF }
         dispatcher.install_handler("kernel32.dll", "GetCurrentProcessId", args: 0) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "GetCurrentThreadId", args: 0) { |_, _| 1 }

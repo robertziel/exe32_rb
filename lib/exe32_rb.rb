@@ -34,10 +34,11 @@ module Exe32Rb
   end
 
   module Api
-    autoload :Dispatcher,  "exe32_rb/api/dispatcher"
-    autoload :Kernel32,    "exe32_rb/api/kernel32"
-    autoload :Conventions, "exe32_rb/api/conventions"
-    autoload :Signatures,  "exe32_rb/api/signatures"
+    autoload :Dispatcher,    "exe32_rb/api/dispatcher"
+    autoload :Kernel32,      "exe32_rb/api/kernel32"
+    autoload :Conventions,   "exe32_rb/api/conventions"
+    autoload :Signatures,    "exe32_rb/api/signatures"
+    autoload :DelphiMemMgr,  "exe32_rb/api/delphi_memmgr"
   end
 
   module Samples

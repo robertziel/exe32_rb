@@ -53,17 +53,10 @@ module Exe32Rb
         @handlers.key?(key(dll, name))
       end
 
-      # Install a Ruby handler at a synthetic thunk address, then patch the
-      # guest's memory at `at_address` so it contains that thunk. Once the
-      # guest does `call [at_address]` (or jmp-through-pointer, vtable
-      # dispatch, etc.) the CPU lands on the thunk and the dispatcher
-      # intercepts it like any IAT call.
-      #
-      # Use case: neutralize an in-binary function pointer — e.g., a Delphi
-      # memory-manager's Free routine that doesn't match our heap layout —
-      # without modifying the binary.
-      def install_call_stub(at_address, name: nil, args: 0, convention: nil, &block)
-        name ||= format("stub_0x%x", at_address)
+      # Install a Ruby handler at a synthetic thunk address. Returns the
+      # address — caller chooses whether to write it into a function-pointer
+      # slot, patch a JMP at a function entry, or both.
+      def install_thunk(name, args: 0, convention: nil, &block)
         thunk_addr = @next
         @next += THUNK_STRIDE
         @thunks[thunk_addr] = Exe32Rb::PE::Image::Import.new(
@@ -72,6 +65,14 @@ module Exe32Rb
         @handlers[key("(stub)", name)] = Entry.new(
           handler: block, args: args, convention: convention || @default_convention
         )
+        thunk_addr
+      end
+
+      # Install a thunk, then patch `at_address` to point at it. Useful for
+      # function-pointer interception (e.g. an in-binary memory manager).
+      def install_call_stub(at_address, name: nil, args: 0, convention: nil, &block)
+        name ||= format("stub_0x%x", at_address)
+        thunk_addr = install_thunk(name, args: args, convention: convention, &block)
         if @mode == 64
           @memory.write_u64(at_address, thunk_addr)
         else
