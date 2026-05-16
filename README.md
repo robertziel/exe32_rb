@@ -185,24 +185,76 @@ PE::Loader  ->  PE::Image  ->  Emulator::Machine
   for ~100 Win32 functions. `--stub-missing` uses this so unhandled
   calls don't drift the `__stdcall` stack.
 
+## Running real-world binaries (Delphi installers etc.)
+
+For binaries that are more than a hello-world, the runtime offers
+several escalating tools:
+
+```sh
+# Permissive defaults: stub unknown APIs, neutralize a single
+# in-binary function pointer (a memmgr / vtable slot you've spotted)
+./exe/exe32_rb run --stub-missing \
+                   --call-stub=0x412740 \
+                   some-installer.exe
+```
+
+```sh
+# Full pipeline for a Delphi-built binary:
+./exe/exe32_rb run --stub-missing \
+                   --delphi-memmgr=0x41273C \      # replace Delphi's TMemoryManager
+                   --winfs \                       # sandbox C:\ paths in /tmp
+                   --watch=0x12345 \               # log writes touching ADDR
+                   some-installer.exe
+```
+
+What each flag does:
+
+* **`--stub-missing`** — installs no-op handlers (with correct arg counts)
+  for every Win32 function in `Api::Signatures`. Keeps the guest stack
+  honest for unhandled `__stdcall` calls.
+* **`--call-stub=ADDR[=N]`** — patch the 4 bytes at ADDR with the address
+  of a synthetic thunk; calls through that pointer land in a Ruby stub
+  returning N. Use to neutralize a single misbehaving function pointer.
+* **`--patch=ADDR=HEX`** — overwrite guest memory at load time. Useful
+  for short-circuiting a known-bad function with a `C3` (RET) byte.
+* **`--watch=ADDR`** — log every write touching ADDR with the current
+  EIP and full register dump. Finds the instruction that corrupted state.
+* **`--delphi-memmgr=ADDR`** — replace Delphi's 6-slot TMemoryManagerEx
+  record (at ADDR) with Ruby `GetMem`/`FreeMem`/`ReallocMem`/`AllocMem`
+  handlers. The biggest single-flag leap for any Delphi 2009+ binary —
+  without this, FastMM-format header reads scattered across the binary
+  will fault.
+* **`--winfs[=DIR]`** — translate all `C:\…` paths to host paths under
+  a sandbox directory. The binary thinks it has a real Windows fs.
+* **`--lenient`** — unmapped reads return 0, writes are dropped. Lets
+  buggy guests stumble forward. Off by default (can mask real bugs).
+
+The emulator's own self-healing:
+
+* **`MemoryError` → SEH** — every access violation synthesizes
+  `EXCEPTION_ACCESS_VIOLATION (0xC0000005)` and dispatches through the
+  guest's `FS:[0]` exception chain. If a handler runs to completion,
+  the binary's own try/finally/except logic gets to run.
+* **`RaiseException` → SEH** — same path; the guest's Delphi `raise`
+  reaches its own handlers instead of halting.
+* **`RtlUnwind`** — walks the SEH chain to the target frame.
+
 ## What's intentionally missing
 
 * **No CRT, no DLL loader.** Imports resolve to Ruby handlers; the
   binary needs to call `ExitProcess` (or you handle the entry-point's
-  `RET`) to halt cleanly.
+  `RET`) to halt cleanly. `LoadLibrary`/`GetProcAddress` return fake
+  handles.
 * **Permission bits are tracked, not enforced.** Writes to read-only
   pages succeed silently.
-* **No FPU / SSE / AVX state.** x87 instructions (D8..DF) and FWAIT
-  decode as length-correct no-ops; XMM/YMM operations don't decode yet.
-* **No SEH unwind** beyond `FS:[0]` returning `0xFFFFFFFF` and a TLS
-  array of zero slots.
-* **No real registry or GUI.** Stubs return plausible values but don't
-  model the underlying state.
-* **No real allocator.** `HeapAlloc` is a bump allocator inside a 16 MiB
-  scratch region; deallocation is a no-op. Binaries with built-in
-  memory managers (e.g., Delphi/FastMM) will eventually trip on heap
-  metadata expectations — use `--call-stub=ADDR` to neutralize the
-  in-binary free routine when that happens.
+* **No real FPU / SSE / AVX.** x87 instructions decode as length-correct
+  no-ops; XMM/YMM operations don't decode yet.
+* **No COM.** `CoCreateInstance` is a stub; DirectX / OLE binaries
+  won't get useful interfaces.
+* **No real registry.** Reads return plausible defaults (LCID 0x0409,
+  empty strings, success codes).
+* **No GUI.** Win32 window creation, message pump, GDI rendering are
+  all stubbed. `MessageBoxA/W` is rendered as an ASCII dialog on stderr.
 
 ## Running tests
 
