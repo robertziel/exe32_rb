@@ -180,17 +180,15 @@ module Exe32Rb
           1 # FILE_TYPE_DISK
         end
 
-        # GetFileAttributesW — return FILE_ATTRIBUTE_NORMAL (0x80) or
-        # 0xFFFFFFFF for missing. Used by installers to test existence.
-        dispatcher.install_handler("kernel32.dll", "GetFileAttributesW", args: 1) do |machine, args|
-          path = machine.read_wstring(args[0])
-          translated = Api::WinFS.translate(machine.fs_root, path)
-          File.exist?(translated) ? 0x80 : 0xFFFF_FFFF
-        end
+        # (GetFileAttributesW already installed below with correct
+        # directory vs file disambiguation; just add the ANSI variant.)
         dispatcher.install_handler("kernel32.dll", "GetFileAttributesA", args: 1) do |machine, args|
           path = machine.read_cstring(args[0])
-          translated = Api::WinFS.translate(machine.fs_root, path)
-          File.exist?(translated) ? 0x80 : 0xFFFF_FFFF
+          host = Api::WinFS.translate(machine.fs_root, path)
+          if !File.exist?(host) then 0xFFFF_FFFF
+          elsif File.directory?(host) then 0x10
+          else 0x80
+          end
         end
 
         # FindResource* walks the parsed .rsrc tree. We return the
