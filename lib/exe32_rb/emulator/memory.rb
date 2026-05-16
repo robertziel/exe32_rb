@@ -30,10 +30,11 @@ module Exe32Rb
         @perms           = {}
         @regions         = []
         @write_callback  = nil
+        @lenient         = false
       end
 
       attr_reader :regions
-      attr_accessor :write_callback
+      attr_accessor :write_callback, :lenient
 
       def map(base, size, permissions: PERM_RW, name: nil, data: nil)
         raise Exe32Rb::MemoryError, "size must be positive" if size <= 0
@@ -62,9 +63,15 @@ module Exe32Rb
         cursor = addr
         while remaining > 0
           page = ensure_page(cursor, :read)
-          offset_in_page = cursor & PAGE_MASK
-          chunk = [PAGE_SIZE - offset_in_page, remaining].min
-          buf << page.byteslice(offset_in_page, chunk)
+          if page.nil?
+            # lenient mode: report zeros for unmapped reads
+            chunk = [PAGE_SIZE - (cursor & PAGE_MASK), remaining].min
+            buf << ("\x00".b * chunk)
+          else
+            offset_in_page = cursor & PAGE_MASK
+            chunk = [PAGE_SIZE - offset_in_page, remaining].min
+            buf << page.byteslice(offset_in_page, chunk)
+          end
           cursor += chunk
           remaining -= chunk
         end
@@ -82,9 +89,14 @@ module Exe32Rb
         remaining = bytes.bytesize
         while remaining > 0
           page = ensure_page(cursor, :write)
-          offset_in_page = cursor & PAGE_MASK
-          chunk = [PAGE_SIZE - offset_in_page, remaining].min
-          page[offset_in_page, chunk] = bytes.byteslice(offset_into_bytes, chunk)
+          if page.nil?
+            # lenient mode: drop writes to unmapped pages
+            chunk = [PAGE_SIZE - (cursor & PAGE_MASK), remaining].min
+          else
+            offset_in_page = cursor & PAGE_MASK
+            chunk = [PAGE_SIZE - offset_in_page, remaining].min
+            page[offset_in_page, chunk] = bytes.byteslice(offset_into_bytes, chunk)
+          end
           cursor += chunk
           offset_into_bytes += chunk
           remaining -= chunk
@@ -99,6 +111,8 @@ module Exe32Rb
         page_num = addr >> PAGE_BITS
         return @pages[page_num] if @pages.key?(page_num)
         unless in_any_region?(addr)
+          return nil if @lenient
+
           raise Exe32Rb::MemoryError, format("%s of unmapped page at 0x%016X", op, addr)
         end
 

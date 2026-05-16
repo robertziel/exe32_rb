@@ -304,6 +304,27 @@ module Exe32Rb
       def op_nop(_); end
       def op_fpu_nop(_); end # x87 instructions silently skipped (no FPU model)
 
+      # AH <-> flags transfers (used by Borland/Delphi floating-point compare
+      # paths via FCOM + FSTSW + SAHF).
+      def op_sahf(_)
+        ah = @cpu.registers.read8h(Registers::RAX)
+        @cpu.flags.cf = (ah & 0x01) != 0
+        @cpu.flags.pf = (ah & 0x04) != 0
+        @cpu.flags.af = (ah & 0x10) != 0
+        @cpu.flags.zf = (ah & 0x40) != 0
+        @cpu.flags.sf = (ah & 0x80) != 0
+      end
+
+      def op_lahf(_)
+        v = 0x02 # bit 1 reserved, always 1
+        v |= 0x01 if @cpu.flags.cf
+        v |= 0x04 if @cpu.flags.pf
+        v |= 0x10 if @cpu.flags.af
+        v |= 0x40 if @cpu.flags.zf
+        v |= 0x80 if @cpu.flags.sf
+        @cpu.registers.write8h(Registers::RAX, v)
+      end
+
       def op_xchg(instr)
         a_op, b_op = instr.operands
         size = a_op.size

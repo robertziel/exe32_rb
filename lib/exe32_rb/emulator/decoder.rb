@@ -143,6 +143,8 @@ module Exe32Rb
           when 0x91..0x97 then xchg_acc_r(opcode)
           when 0x98       then cdqe_or_cwde_or_cbw
           when 0x9B       then simple(:fpu_nop) # FWAIT
+          when 0x9E       then simple(:sahf)    # store AH into low byte of FLAGS
+          when 0x9F       then simple(:lahf)    # load AH from low byte of FLAGS
           when 0xA0       then mov_acc_moffs(8, dst_is_acc: true)
           when 0xA1       then mov_acc_moffs(operand_size_v, dst_is_acc: true)
           when 0xA2       then mov_acc_moffs(8, dst_is_acc: false)

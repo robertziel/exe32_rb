@@ -23,6 +23,10 @@ module Exe32Rb
         --call-stub=ADDR[=RETVAL]    redirect call-through-pointer at ADDR to a
                                      stub that returns RETVAL (default 0)
                                      e.g. --call-stub=0x412740=0  (repeatable)
+        --patch=ADDR=HEX             overwrite guest memory at ADDR with HEX bytes
+                                     e.g. --patch=0x401C7C=33C0C3   (repeatable)
+        --lenient                    unmapped reads return 0, writes are dropped
+                                     (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
 
       disasm options:
@@ -64,7 +68,7 @@ module Exe32Rb
     end
 
     def cmd_run
-      opts = {trace: false, stub_missing: false, call_stubs: []}
+      opts = {trace: false, stub_missing: false, call_stubs: [], patches: []}
       OptionParser.new do |o|
         o.on("--trace")          { opts[:trace] = true }
         o.on("--stub-missing")   { opts[:stub_missing] = true }
@@ -73,18 +77,32 @@ module Exe32Rb
           addr_str, ret_str = s.split("=", 2)
           opts[:call_stubs] << [Integer(addr_str), ret_str ? Integer(ret_str) : 0]
         end
+        o.on("--patch=ADDR=HEX", String) do |s|
+          addr_str, hex = s.split("=", 2)
+          opts[:patches] << [Integer(addr_str), [hex].pack("H*")]
+        end
+        o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
 
       image = load_image(path)
       machine = Exe32Rb::Emulator::Machine.new(image, trace: opts[:trace]).configure
+      machine.memory.lenient = true if opts[:lenient]
       install_stub_missing(machine) if opts[:stub_missing]
       install_call_stubs(machine, opts[:call_stubs])
+      apply_patches(machine, opts[:patches])
 
       kw = {}
       kw[:max_steps] = opts[:max_steps] if opts[:max_steps]
       machine.run(**kw)
       [(machine.exit_code || 0) & 0xFF, 255].min
+    end
+
+    def apply_patches(machine, patches)
+      patches.each do |addr, bytes|
+        machine.memory.write(addr, bytes)
+        warn format("[patch] wrote %d bytes at 0x%x", bytes.bytesize, addr)
+      end
     end
 
     def install_call_stubs(machine, specs)
