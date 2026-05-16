@@ -33,7 +33,8 @@ module Exe32Rb
         --break=ADDR                 log register state when EIP hits ADDR (repeatable)
         --delphi-memmgr=ADDR         replace the Delphi TMemoryManager record at ADDR
                                      with Ruby handlers (GetMem/FreeMem/Realloc...)
-                                     e.g. --delphi-memmgr=0x41273C for Akimbo
+                                     find ADDR by scanning .data for a run of 6
+                                     consecutive function pointers in .text
         --winfs[=DIR]                map guest C:\... paths into a sandbox dir on
                                      host (default: <TMPDIR>/exe32_rb_root). All
                                      CreateFile/Directory/Delete calls translate.

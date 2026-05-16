@@ -119,8 +119,8 @@ breakpoints:                 imports        list IAT imports
   recursion unwinds).
 * `disasm 30` from the entry point — read the prologue / epilogue
   patterns and the recursive call's relative offset.
-* `strings examples/akimbo-or-any.exe` — dump the binary's UI text
-  without running a single instruction.
+* `strings any-binary.exe` — dump the binary's UI text without running
+  a single instruction.
 * `imports` — see exactly which Win32 functions the binary depends on,
   with the synthetic thunk addresses the dispatcher has bound.
 
