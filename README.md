@@ -49,6 +49,8 @@ What's in the box:
 | Tier-3 basic-block JIT (Ruby source-gen via `eval`) | ✅ | `--jit` flag; `lib/exe32_rb/emulator/jit.rb` |
 | `InterlockedExchange/CompareExchange/Increment/Decrement` with real RMW semantics | ✅ | `lib/exe32_rb/api/kernel32.rb` |
 | `CreateProcess*` / `WaitForSingleObject*` / `GetExitCodeProcess` stubs | ✅ | Pretend child ran cleanly; cannot actually launch a Win32 child |
+| `SetEndOfFile` / `FlushFileBuffers` / `GetFileType` / `GetFileAttributesA/W` | ✅ | Needed by installers that pre-allocate the destination |
+| Akimbo Kung-Fu Hero InnoSetup installer runs to clean exit | ✅ | `exit_code=0` after ~6 min wall on M-series; decompresses payload, fake-launches inner setup, cleans up |
 
 What's *not* here (and won't realistically arrive in a single session):
 real DirectInput/DirectSound, real registry, real GUI message pump,
