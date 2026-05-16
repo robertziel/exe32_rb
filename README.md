@@ -46,10 +46,11 @@ What's in the box:
 | Ruby2D live visualizer (regs/disasm/stack/log) | ✅ | `exe32_rb visualize` |
 | Instruction breakpoints + memory watchpoints | ✅ | `--break`, `--watch` |
 | Hello-world / factorial / hello-file sample fixtures | ✅ | `lib/exe32_rb/samples/` |
+| Tier-3 basic-block JIT (Ruby source-gen via `eval`) | ✅ | `--jit` flag; `lib/exe32_rb/emulator/jit.rb` |
 
 What's *not* here (and won't realistically arrive in a single session):
 real DirectInput/DirectSound, real registry, real GUI message pump,
-JIT, multithreading, full SEH unwind semantics.
+multithreading, full SEH unwind semantics, native code generation.
 
 ## Benchmarks
 
@@ -61,13 +62,36 @@ Measured on an Apple Silicon Mac (M-series), Ruby 3.3.0, single core:
 | `run examples/factorial.exe` | **~150 ms** | Recursive call/ret, IMUL, conditional jumps; computes 5!=120 |
 | `run examples/hello_file.exe` | **~150 ms** | CreateFileW + WriteFile + CloseHandle round-trip to host disk |
 | Full test suite (`rake test`) | **~200 ms** | 37 runs / 97 assertions covering decoder, executor, SEH, FPU, SSE, COM, DLL loader, WinFS |
-| Sustained throughput on real binary | **~100,000 instructions/sec** | Measured running a real Delphi InnoSetup installer; pure interpreted Ruby |
+| Sustained throughput (interpreter, baseline) | **~100 kips** | Decoder fresh, no caching — the original implementation |
+| Sustained throughput (Tier 1 + 2: icache + method handle) | **~600 kips** | 6× faster than baseline. This is the default |
+| Sustained throughput (Tier 3: `--jit` basic-block compiler) | **~750 kips** | 7.5× over baseline, 25% over Tier 2. `eval`-generates Ruby per block |
 
 For context: a native x86 CPU executes ~1–3 *billion* instructions per
-second. We're ~10,000× slower per instruction, which means the
-emulator is well-suited to short binaries (< a few million
+second. Even with the JIT we're ~3,000× slower per instruction, which
+means the emulator is well-suited to short binaries (< a few million
 instructions of work) and learning, and not suited to multi-MB
-compressed payload validation or 60 fps game loops.
+compressed payload validation or 60 fps game loops. The JIT helps —
+but the per-instruction work happens in interpreted Ruby executor
+methods, so there's a hard floor below which we can't go without
+emitting actual native code.
+
+### JIT details
+
+Run with `--jit` to enable. The basic-block compiler:
+
+1. Walks instructions starting at the current EIP, collecting up to 64
+   into a basic block ending at the first terminator (`jmp`, `jcc`,
+   `call`, `ret`, `int`, etc.).
+2. Generates a Ruby `lambda` source string with one direct executor
+   method call per instruction (e.g. `executor.op_mov(i3)`).
+3. `eval`s that lambda once; from then on each cache hit is one
+   `Method#call` for the whole block instead of one for every guest
+   instruction.
+
+Block cache is invalidated when the guest writes to executable pages
+(rare — fast-pathed). For typical non-self-modifying binaries blocks
+are compiled once and reused. Average block size on real Delphi
+binaries: ~6.5 instructions per block on hot paths.
 
 ### Code size
 

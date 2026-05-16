@@ -33,6 +33,7 @@ module Exe32Rb
     autoload :Executor,    "exe32_rb/emulator/executor"
     autoload :FPU,         "exe32_rb/emulator/fpu"
     autoload :XMM,         "exe32_rb/emulator/xmm"
+    autoload :JIT,         "exe32_rb/emulator/jit"
   end
 
   module Api

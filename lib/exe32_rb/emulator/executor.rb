@@ -30,12 +30,16 @@ module Exe32Rb
       end
 
       def execute(instr)
-        method_name = :"op_#{instr.mnemonic}"
-        unless respond_to?(method_name, true)
-          raise Exe32Rb::ExecutionError, "no executor for mnemonic :#{instr.mnemonic} at 0x#{instr.address.to_s(16)}"
+        h = instr.executor_handle
+        if h.nil?
+          method_name = :"op_#{instr.mnemonic}"
+          unless respond_to?(method_name, true)
+            raise Exe32Rb::ExecutionError, "no executor for mnemonic :#{instr.mnemonic} at 0x#{instr.address.to_s(16)}"
+          end
+          h = method(method_name)
+          instr.executor_handle = h
         end
-
-        send(method_name, instr)
+        h.call(instr)
       end
 
       # ----------------------------------------------------------------

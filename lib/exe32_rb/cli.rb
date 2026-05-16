@@ -39,6 +39,8 @@ module Exe32Rb
                                      host (default: <TMPDIR>/exe32_rb_root). All
                                      CreateFile/Directory/Delete calls translate.
         --lenient                    unmapped reads return 0, writes are dropped
+        --jit                        enable basic-block JIT (~25% faster, mutually
+                                     exclusive with --trace)
                                      (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
 
@@ -106,11 +108,13 @@ module Exe32Rb
         o.on("--dll-search=DIR", String) { |s| (opts[:dll_search] ||= []) << s }
         o.on("--directdraw") { opts[:directdraw] = true }
         o.on("--lenient") { opts[:lenient] = true }
+        o.on("--jit") { opts[:jit] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
 
       image = load_image(path)
       machine = Exe32Rb::Emulator::Machine.new(image, trace: opts[:trace]).configure
+      machine.enable_jit if opts[:jit]
       machine.memory.lenient = true if opts[:lenient]
       install_stub_missing(machine) if opts[:stub_missing]
       install_call_stubs(machine, opts[:call_stubs])

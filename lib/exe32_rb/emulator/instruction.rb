@@ -11,6 +11,9 @@ module Exe32Rb
     # `meta` holds extras like {cc: :ne} for Jcc, or {opsize: 64}.
     class Instruction
       attr_reader :address, :mnemonic, :operands, :length, :meta, :raw
+      # JIT tier 2: cache the bound method (or nil if not bound yet) so
+      # the Executor skips the per-step `send(:op_xxx)` symbol lookup.
+      attr_accessor :executor_handle
 
       def initialize(address:, mnemonic:, operands: [], length:, meta: {}, raw: "")
         @address  = address
@@ -19,6 +22,7 @@ module Exe32Rb
         @length   = length
         @meta     = meta
         @raw      = raw
+        @executor_handle = nil
       end
 
       def to_s

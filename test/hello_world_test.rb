@@ -43,6 +43,45 @@ class HelloWorldTest < Minitest::Test
     end
   end
 
+  def test_factorial_sample_returns_120_under_jit
+    Dir.mktmpdir do |dir|
+      exe = File.join(dir, "fact.exe")
+      Exe32Rb::Samples::Factorial.write(exe)
+
+      machine = Exe32Rb::Machine.from_path(exe).configure
+      machine.enable_jit
+      machine.run
+      assert_equal 120, machine.exit_code
+      refute_empty machine.jit.blocks,
+                   "JIT should have compiled at least one block"
+    end
+  end
+
+  def test_hello_world_under_jit
+    out = capture_subprocess_io_for(__method__) do
+      Dir.mktmpdir do |dir|
+        exe = File.join(dir, "hello.exe")
+        Exe32Rb::Samples::HelloWorld.write(exe)
+        machine = Exe32Rb::Machine.from_path(exe).configure
+        machine.enable_jit
+        machine.run
+      end
+    end
+    assert_includes out, "Hello, world!"
+  end
+
+  private
+
+  def capture_subprocess_io_for(_)
+    captured_stdout, $stdout = $stdout, StringIO.new
+    yield
+    $stdout.string
+  ensure
+    $stdout = captured_stdout
+  end
+
+  public
+
   def test_machine_rejects_64bit_image
     Dir.mktmpdir do |dir|
       # Build a minimal x86_64 PE32+ header to confirm the gate.

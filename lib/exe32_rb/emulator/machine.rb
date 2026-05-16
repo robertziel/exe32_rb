@@ -47,6 +47,8 @@ module Exe32Rb
         @next_handle    = HANDLE_BASE
       end
 
+      attr_accessor :jit
+
       def configure
         ensure_supported_machine
         map_image
@@ -56,7 +58,48 @@ module Exe32Rb
         @dispatcher.install_builtins
         @dispatcher.bind_imports(@image)
         seed_initial_state
+        compute_text_ranges
+        @jit = nil
         self
+      end
+
+      # Enable the basic-block JIT. Off by default — turn on via
+      # Machine#enable_jit or the --jit CLI flag. Off when tracing
+      # (the per-instruction warn requires per-step dispatch).
+      def enable_jit
+        @jit = JIT.new(self) unless @trace
+        self
+      end
+
+      # Compute the [start, end) virtual address ranges of executable
+      # sections from the loaded image. Instructions decoded from addresses
+      # inside these ranges go into the instruction cache (we assume
+      # binaries don't self-modify their own .text — true for ~all
+      # non-packed code). Writes outside these ranges (scratch, stack,
+      # decoder-emitted thunks) bypass the cache.
+      def compute_text_ranges
+        @text_ranges = @image.sections.select(&:executable?).map do |s|
+          base = @image.image_base + s.virtual_address
+          size = [s.virtual_size, s.size_of_raw_data].max
+          (base...(base + size))
+        end
+        # Fast path: most binaries have ONE .text section. Cache the lo/hi
+        # for a tight integer compare in in_text?.
+        if @text_ranges.size == 1
+          @text_lo = @text_ranges[0].begin
+          @text_hi = @text_ranges[0].end
+        else
+          @text_lo = @text_hi = nil
+        end
+        @instr_cache = {} # rip => Instruction
+      end
+
+      def in_text?(rip)
+        if @text_lo
+          rip >= @text_lo && rip < @text_hi
+        else
+          @text_ranges.any? { |r| r.cover?(rip) }
+        end
       end
 
       def ensure_supported_machine
@@ -104,7 +147,25 @@ module Exe32Rb
           return :api
         end
 
-        instr = @decoder.decode(rip)
+        # JIT (tier 3): compile a basic block (sequence of instructions
+        # ending in a terminator) into a Ruby lambda that runs them all
+        # in one dispatch. Returns instruction count for bulk counter
+        # update. Falls back to single-step for thunks / non-.text addrs.
+        if @jit && in_text?(rip)
+          @steps_executed += @jit.run_block(rip)
+          return :jit_block
+        end
+
+        # Instruction cache (JIT tier 1): re-decoding the same bytes
+        # millions of times is the interpreter's biggest cost. Cache
+        # Instruction objects keyed by rip for addresses in executable
+        # sections (we assume those sections aren't self-modifying;
+        # binaries that do rewrite their .text need a real invalidator).
+        instr = @instr_cache[rip]
+        if instr.nil?
+          instr = @decoder.decode(rip)
+          @instr_cache[rip] = instr if in_text?(rip)
+        end
         trace_instr(instr) if @trace
         @cpu.rip = (rip + instr.length) & @cpu.address_mask
         @executor.execute(instr)
