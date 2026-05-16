@@ -47,17 +47,20 @@ module Exe32Rb
     autoload :DllLoader,     "exe32_rb/api/dll_loader"
     autoload :DllLoaderInstall, "exe32_rb/api/dll_loader"
     autoload :DirectDraw,    "exe32_rb/api/directdraw"
+    autoload :User32,        "exe32_rb/api/user32"
   end
 
   module Samples
     autoload :HelloWorld, "exe32_rb/samples/hello_world"
     autoload :HelloFile,  "exe32_rb/samples/hello_file"
     autoload :Factorial,  "exe32_rb/samples/factorial"
+    autoload :HelloWindow, "exe32_rb/samples/hello_window"
   end
 
   autoload :CLI,        "exe32_rb/cli"
   autoload :Debugger,   "exe32_rb/debugger"
   autoload :Visualizer, "exe32_rb/visualizer"
+  autoload :GUI,        "exe32_rb/gui"
 
   # Convenience: load a PE32 image and build a Machine ready to configure.run.
   # Rejects PE32+ / non-i386 images with a clear message.

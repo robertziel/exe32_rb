@@ -296,6 +296,127 @@ class InfrastructureTest < Minitest::Test
     assert_equal 0x10, machine.memory.read_u32(addr)
   end
 
+  def test_gui_register_and_show_window_queues_paint
+    gui = Exe32Rb::GUI.new
+    hwnd = gui.register_window(class_name: "Test", title: "hi", x: 0, y: 0,
+                                width: 320, height: 200, wndproc: 0xCAFE0000)
+    assert_kind_of Integer, hwnd
+    assert_equal "hi", gui.windows[hwnd][:title]
+
+    gui.show_window(hwnd)
+    msg = gui.poll_message(wait: false)
+    assert_equal hwnd, msg.hwnd
+    assert_equal Exe32Rb::GUI::WM_PAINT, msg.message
+  end
+
+  def test_gui_post_and_poll_message
+    gui = Exe32Rb::GUI.new
+    hwnd = gui.register_window(class_name: "T", title: "t", x: 0, y: 0,
+                                width: 64, height: 48, wndproc: 0x1234)
+    gui.post_message(hwnd, Exe32Rb::GUI::WM_KEYDOWN, 0x41, 0)
+    m = gui.poll_message(wait: false)
+    assert_equal Exe32Rb::GUI::WM_KEYDOWN, m.message
+    assert_equal 0x41, m.wparam
+  end
+
+  def test_user32_create_window_dispatch_invokes_guest_wndproc
+    # Plant a tiny stdcall WndProc at 0x500200:
+    #   mov eax, [esp+8]    ; uMsg (2nd arg)
+    #   ret 16              ; pop 4 stdcall args, return
+    # So return value == the message code passed in.
+    machine = build_kernel32_machine
+    Exe32Rb::Api::User32.install(machine, gui: Exe32Rb::GUI.new.tap { |g|
+      machine.instance_variable_set(:@_test_gui, g)
+    })
+    gui = machine.instance_variable_get(:@_test_gui)
+    fn_addr = 0x00500200
+    machine.memory.map(fn_addr & ~0xFFF, 0x1000, name: "wndproc")
+    # 8B 44 24 08 = mov eax, [esp+8]
+    # C2 10 00    = ret 16
+    machine.memory.write(fn_addr, [0x8B, 0x44, 0x24, 0x08, 0xC2, 0x10, 0x00].pack("C*"))
+
+    # Register the class via the GUI directly (skip building a WNDCLASS).
+    gui.register_class("TestClass", fn_addr)
+    hwnd = gui.register_window(class_name: "TestClass", title: "T",
+                                x: 0, y: 0, width: 100, height: 100,
+                                wndproc: fn_addr)
+
+    # Build a fake MSG with message=0x55 at scratch, then dispatch.
+    msg_addr = 0x10500
+    machine.memory.write_u32(msg_addr + 0, hwnd)
+    machine.memory.write_u32(msg_addr + 4, 0x55)
+    machine.memory.write_u32(msg_addr + 8, 0x123)
+    machine.memory.write_u32(msg_addr + 12, 0x456)
+
+    result = invoke_api(machine, "DispatchMessageW", [msg_addr])
+    assert_equal 0x55, result, "DispatchMessageW should return WndProc's EAX (= message code)"
+  end
+
+  def test_user32_register_class_resolves_wndproc_on_create_window
+    machine = build_kernel32_machine
+    gui = Exe32Rb::GUI.new
+    Exe32Rb::Api::User32.install(machine, gui: gui)
+
+    # Build a WNDCLASSW in memory at 0x10800
+    wc_addr = 0x10800
+    name_addr = 0x10900
+    [0, 0xABCD0000, 0, 0, 0, 0, 0, 0, 0, name_addr].each_with_index do |v, i|
+      machine.memory.write_u32(wc_addr + i * 4, v)
+    end
+    "MyClass".each_char.with_index { |c, i| machine.memory.write_u16(name_addr + i * 2, c.ord) }
+    machine.memory.write_u16(name_addr + 7 * 2, 0)
+
+    atom = invoke_api(machine, "RegisterClassW", [wc_addr])
+    assert atom > 0
+    assert_equal 0xABCD0000, gui.wndproc_for_class("MyClass")
+  end
+
+  def test_gui_request_quit_pushes_wm_quit
+    gui = Exe32Rb::GUI.new
+    gui.request_quit
+    m = gui.poll_message(wait: false)
+    assert_equal Exe32Rb::GUI::WM_QUIT, m.message
+    assert gui.want_quit?
+  end
+
+  def test_call_guest_runs_nested_function_and_returns_eax
+    # Plant a tiny stdcall fn at 0x500000:
+    #   add  eax, [esp+4]   ; add arg1 to eax
+    #   ret  4              ; pop arg, return
+    machine = build_kernel32_machine
+    fn_addr = 0x00500000
+    machine.memory.map(fn_addr & ~0xFFF, 0x1000, name: "fn")
+    # 03 44 24 04  =  add eax, dword ptr [esp+4]
+    # C2 04 00     =  ret 4
+    machine.memory.write(fn_addr, [0x03, 0x44, 0x24, 0x04, 0xC2, 0x04, 0x00].pack("C*"))
+    machine.cpu.registers.write32(0, 0x10) # initial EAX
+
+    saved_rip = machine.cpu.rip
+    saved_rsp = machine.cpu.rsp
+    result = machine.call_guest(fn_addr, [0x32])
+
+    assert_equal 0x42, result, "EAX should be 0x10 + 0x32"
+    assert_equal saved_rip, machine.cpu.rip, "outer RIP should be restored"
+    assert_equal saved_rsp, machine.cpu.rsp, "outer RSP should be restored"
+  end
+
+  def test_call_guest_supports_nested_calls
+    # Inner fn at 0x500100: returns 0xAA.
+    # Outer fn at 0x500000: calls inner via call_guest from a Ruby hook,
+    # then ret's 0xCAFE — but we test the simpler thing: two sequential
+    # call_guest invocations from the same Ruby caller.
+    machine = build_kernel32_machine
+    machine.memory.map(0x00500000 & ~0xFFF, 0x1000, name: "fn")
+    # fn1: mov eax, 0xAA; ret
+    machine.memory.write(0x00500000, [0xB8, 0xAA, 0, 0, 0, 0xC3].pack("C*"))
+    # fn2: mov eax, 0xBB; ret
+    machine.memory.write(0x00500010, [0xB8, 0xBB, 0, 0, 0, 0xC3].pack("C*"))
+
+    assert_equal 0xAA, machine.call_guest(0x00500000)
+    assert_equal 0xBB, machine.call_guest(0x00500010)
+    refute machine.halted?, "machine should not be halted after nested calls"
+  end
+
   def test_create_process_w_populates_process_information
     require "exe32_rb/api/kernel32"
     machine = build_kernel32_machine
@@ -327,12 +448,19 @@ class InfrastructureTest < Minitest::Test
   # Look up a handler by kernel32!<name> key and invoke it with `args`,
   # bypassing convention.read_args/cleanup — handlers receive an args
   # array directly, so we just hand it through.
-  def invoke_api(machine, name, args)
-    # Dispatcher#key lowercases dll but keeps name as-is.
-    key = "kernel32.dll!#{name}"
-    entry = machine.dispatcher.instance_variable_get(:@handlers)[key] or
-      raise "no handler installed for #{name}"
-    entry.handler.call(machine, args)
+  def invoke_api(machine, name, args, dll: nil)
+    # Dispatcher#key lowercases dll but keeps name as-is. We try kernel32
+    # first since most tests use it; fall back to scanning all handlers
+    # for the unique `name` match if not specified.
+    handlers = machine.dispatcher.instance_variable_get(:@handlers)
+    candidates = if dll
+                   [handlers["#{dll.downcase}!#{name}"]]
+                 else
+                   handlers.select { |k, _| k.end_with?("!#{name}") }.values
+                 end.compact
+    raise "no handler installed for #{name}" if candidates.empty?
+    raise "ambiguous handler for #{name} (use dll:)" if candidates.size > 1
+    candidates.first.handler.call(machine, args)
   end
 
   # Build a Machine-like fake exposing just .cpu and .registers for

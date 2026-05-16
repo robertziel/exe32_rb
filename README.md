@@ -51,6 +51,8 @@ What's in the box:
 | `CreateProcess*` / `WaitForSingleObject*` / `GetExitCodeProcess` stubs | ✅ | Pretend child ran cleanly; cannot actually launch a Win32 child |
 | `SetEndOfFile` / `FlushFileBuffers` / `GetFileType` / `GetFileAttributesA/W` | ✅ | Needed by installers that pre-allocate the destination |
 | Akimbo Kung-Fu Hero InnoSetup installer runs to clean exit | ✅ | `exit_code=0` after ~6 min wall on M-series; decompresses payload, fake-launches inner setup, cleans up |
+| GUI foundation: real Ruby2D window via `--gui` | ⚠ partial | `lib/exe32_rb/gui.rb` + `lib/exe32_rb/api/user32.rb`. Opens a real macOS window, runs a message pump, dispatches WndProcs via `Machine#call_guest`. MessageBoxW shows in the window (3s auto-dismiss). No GDI yet — Delphi forms still won't paint their widgets. |
+| `Machine#call_guest`: nested guest invocations from a Ruby handler | ✅ | Unique per-call sentinel; needed by DispatchMessageW → guest WndProc |
 
 What's *not* here (and won't realistically arrive in a single session):
 real DirectInput/DirectSound, real registry, real GUI message pump,

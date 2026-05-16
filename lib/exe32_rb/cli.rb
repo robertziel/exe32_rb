@@ -41,6 +41,10 @@ module Exe32Rb
         --lenient                    unmapped reads return 0, writes are dropped
         --jit                        enable basic-block JIT (~25% faster, mutually
                                      exclusive with --trace)
+        --gui                        run emulator in a worker thread and open a real
+                                     Ruby2D window for the guest. CreateWindowExW /
+                                     ShowWindow / GetMessageW are bound to user32
+                                     handlers that drive the window.
                                      (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
 
@@ -109,6 +113,7 @@ module Exe32Rb
         o.on("--directdraw") { opts[:directdraw] = true }
         o.on("--lenient") { opts[:lenient] = true }
         o.on("--jit") { opts[:jit] = true }
+        o.on("--gui") { opts[:gui] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
 
@@ -145,11 +150,56 @@ module Exe32Rb
         require "exe32_rb/api/directdraw"
         Exe32Rb::Api::DirectDraw.install(machine)
       end
+      if opts[:gui]
+        require "exe32_rb/api/user32"
+        Exe32Rb::Api::User32.install(machine)
+      end
 
       kw = {}
       kw[:max_steps] = opts[:max_steps] if opts[:max_steps]
-      machine.run(**kw)
-      [(machine.exit_code || 0) & 0xFF, 255].min
+
+      if opts[:gui]
+        run_with_gui(machine, **kw)
+      else
+        machine.run(**kw)
+        [(machine.exit_code || 0) & 0xFF, 255].min
+      end
+    end
+
+    # Run the emulator on a worker thread, then turn the main thread
+    # over to Ruby2D's event loop. The first window the guest creates
+    # becomes the visible OS window; closing it tears the emulator down.
+    def run_with_gui(machine, **kw)
+      require "exe32_rb/gui"
+      gui = Exe32Rb::GUI.instance
+      exit_status = nil
+
+      emu = Thread.new do
+        Thread.current.report_on_exception = true
+        begin
+          # Wait until run_event_loop has actually called Ruby2D::Window.show
+          # so that early GUI calls (MessageBoxW from main(), etc.) see a
+          # live window and don't fall through to the headless path.
+          gui.wait_until_ready
+          machine.run(**kw)
+          exit_status = [(machine.exit_code || 0) & 0xFF, 255].min
+        rescue => e
+          warn "[gui] emulator thread crashed: #{e.class}: #{e.message}"
+          warn e.backtrace.first(5).join("\n")
+          exit_status = 1
+        ensure
+          gui.request_quit
+        end
+      end
+
+      # Discover the eventual window title once the guest creates a
+      # window; until then, show a placeholder title.
+      gui.run_event_loop(title: "exe32_rb — running #{File.basename(machine.image.path)}",
+                          width: 800, height: 600)
+
+      emu.join(2) # give the worker a moment to wind down
+      emu.kill if emu.alive?
+      exit_status || 0
     end
 
     # Instruction breakpoints — log register state every time EIP hits ADDR.

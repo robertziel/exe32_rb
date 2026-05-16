@@ -20,6 +20,13 @@ module Exe32Rb
       SCRATCH_BASE_32    = 0x1000_0000  # well below stack/TIB so 16 MB fits
       TIB_BASE_32        = 0x7EFD_E000
       HALT_SENTINEL_32   = 0xDEAD_BEEF
+      # Distinct sentinels for nested guest calls (see #call_guest). Each
+      # active nested call has its own per-call sentinel address in this
+      # range so we can detect "this nested call has returned" without
+      # interfering with the global HALT_SENTINEL or with other nested
+      # calls on the stack.
+      CALL_RETURN_SENTINEL_BASE_32 = 0xDEAD_C000
+      CALL_RETURN_SENTINEL_BASE_64 = 0xDEAD_C000_DEAD_C000
       TIB_SIZE           = 0x1000
       HANDLE_BASE        = 0x4000_1000
 
@@ -45,6 +52,10 @@ module Exe32Rb
         @steps_executed = 0
         @handles        = {}
         @next_handle    = HANDLE_BASE
+        # Stack of active call_guest sentinels (innermost last). Each call
+        # consumes the next sentinel down from CALL_RETURN_SENTINEL_BASE.
+        @call_sentinels = []
+        @call_sentinel_base = @mode == 64 ? CALL_RETURN_SENTINEL_BASE_64 : CALL_RETURN_SENTINEL_BASE_32
       end
 
       attr_accessor :jit
@@ -120,6 +131,11 @@ module Exe32Rb
 
       def step
         rip = @cpu.rip
+        # Nested-call sentinel: a #call_guest invocation is returning. Throw
+        # out to its frame's run loop without halting the whole machine.
+        if !@call_sentinels.empty? && @call_sentinels.include?(rip)
+          throw(:call_guest_return, rip)
+        end
         if rip == @halt_sentinel
           # If we returned here from an SEH handler that requested
           # ContinueSearch (eax == 1), walk to the next frame and try
@@ -182,6 +198,66 @@ module Exe32Rb
           :seh
         else
           raise
+        end
+      end
+
+      # Call a guest function from a Ruby API handler. Sets up an stdcall
+      # frame (args pushed right-to-left, then return address), points RIP
+      # at `addr`, and runs the machine until the return address sentinel
+      # is reached. Returns the value the guest put in EAX.
+      #
+      # Used by user32's DispatchMessageW to invoke the guest's WndProc.
+      # The sentinel is unique per active nested call so we can recurse.
+      def call_guest(addr, args = [], convention: :stdcall)
+        # Allocate a fresh sentinel for this call frame.
+        depth = @call_sentinels.size
+        sentinel = (@call_sentinel_base + depth * 0x10) & @cpu.address_mask
+        @call_sentinels.push(sentinel)
+
+        # Save callee-clobberable state so the handler's caller doesn't
+        # see EAX/EDX/ECX trashed by the guest fn.
+        saved = {
+          rip: @cpu.rip, rsp: @cpu.rsp,
+          eax: @cpu.registers.read32(0),
+          ecx: @cpu.registers.read32(1),
+          edx: @cpu.registers.read32(2),
+        }
+
+        begin
+          if @mode == 32
+            # stdcall: callee pops the args. Push right-to-left, then the
+            # return-to-sentinel address last (so it's at [esp+0]).
+            args.reverse_each { |a| @cpu.push32(@memory, a & 0xFFFF_FFFF) }
+            @cpu.push32(@memory, sentinel)
+          else
+            # Mostly placeholder — 64-bit MS x64 uses regs for first 4
+            # args and a 32-byte shadow space. Not exercised yet.
+            args.reverse_each { |a| @cpu.push_native(@memory, a) }
+            @cpu.push_native(@memory, sentinel)
+          end
+          @cpu.rip = addr
+
+          # Inner step loop: keep stepping until the throw fires (sentinel
+          # hit) or the machine halts entirely.
+          catch(:call_guest_return) do
+            until @halted
+              step
+            end
+          end
+
+          retval = @cpu.registers.read32(0)
+          retval
+        ensure
+          @call_sentinels.pop
+          # Restore the caller's RIP/RSP; if convention is :cdecl we'd
+          # also need to pop the args, but stdcall callees already did it
+          # for us. Either way, restore the caller's saved frame state.
+          @cpu.rip = saved[:rip]
+          @cpu.rsp = saved[:rsp]
+          @cpu.registers.write32(1, saved[:ecx])
+          @cpu.registers.write32(2, saved[:edx])
+          # Don't restore EAX — that's the call's return value, callers
+          # want to read it via the explicit return from this method.
         end
       end
 
