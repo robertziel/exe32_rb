@@ -44,6 +44,11 @@ module Exe32Rb
           drive = Regexp.last_match(1).upcase
           rest  = Regexp.last_match(2).tr("\\", "/")
           File.join(root, drive, rest)
+        elsif path.start_with?("/")
+          # Host-absolute path (Unix). Pass through unchanged so the binary
+          # can read host files it has legitimate references to (e.g. its
+          # own .exe image whose path it learned from GetModuleFileNameW).
+          path
         else
           # Relative path: route into the synthetic C:\Temp under the sandbox
           # so the binary's "is-XXX.tmp" temp dir lands somewhere predictable

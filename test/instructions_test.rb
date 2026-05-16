@@ -187,6 +187,26 @@ class InstructionsTest < Minitest::Test
     assert_in_delta(1.0,      cpu.fpu.st(2), 1e-12)
   end
 
+  def test_fpu_fild_fistp_m64_preserves_64bit_precision
+    # The Delphi RTL's fast 8-byte memcpy uses FILD m64 + FISTP m64 to
+    # round-trip 64-bit integers through the FPU. If we store as Float
+    # we lose 11 bits of precision; here we assert the round-trip is
+    # bit-exact for values that exceed double precision.
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    @memory.write_u64(0x60_0000, 0x0065_0073_0055_002F) # UTF-16LE "/Us\0"
+    cpu.registers.write32(0, 0x60_0000)  # eax
+    cpu.registers.write32(2, 0x60_0010)  # edx (dst)
+
+    # fild qword [eax]  ; df 28
+    # fistp qword [edx] ; df 3a
+    @memory.write(CODE_BASE, [0xDF, 0x28, 0xDF, 0x3A].pack("C*"))
+    2.times { run_one(decoder, executor) }
+
+    assert_equal 0x0065_0073_0055_002F, @memory.read_u64(0x60_0010),
+                 "FILD/FISTP m64 should preserve all 64 bits exactly"
+  end
+
   def test_fpu_faddp
     decoder, executor = make(32)
     cpu = executor.instance_variable_get(:@cpu)
