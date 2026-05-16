@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "tmpdir"
+require "fileutils"
 
 module Exe32Rb
   module Api
@@ -81,6 +82,13 @@ module Exe32Rb
             # back to the image path so the unpacker can proceed.
             path = File.absolute_path(machine.image.path)
             warn "[CreateFileW] empty path; falling back to image (#{path})"
+          else
+            translated = Api::WinFS.translate(machine.fs_root, path)
+            if translated != path
+              warn format("[CreateFileW] %s -> %s", path, translated)
+              FileUtils.mkdir_p(File.dirname(translated)) rescue nil
+              path = translated
+            end
           end
           r = (access & 0x8000_0000) != 0
           w = (access & 0x4000_0000) != 0
@@ -197,26 +205,27 @@ module Exe32Rb
         dispatcher.install_handler("kernel32.dll", "LockResource", args: 1) { |_, args| args[0] }
 
         dispatcher.install_handler("kernel32.dll", "DeleteFileW", args: 1) do |machine, args|
-          File.delete(machine.read_wstring(args[0]))
+          File.delete(Api::WinFS.translate(machine.fs_root, machine.read_wstring(args[0])))
           1
         rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
           0
         end
 
         dispatcher.install_handler("kernel32.dll", "GetFileAttributesW", args: 1) do |machine, args|
-          path = machine.read_wstring(args[0])
-          if !File.exist?(path) then 0xFFFF_FFFF
-          elsif File.directory?(path) then 0x10
+          guest = machine.read_wstring(args[0])
+          host  = Api::WinFS.translate(machine.fs_root, guest)
+          if !File.exist?(host) then 0xFFFF_FFFF
+          elsif File.directory?(host) then 0x10
           else 0x80
           end
         end
 
         dispatcher.install_handler("kernel32.dll", "CreateDirectoryW", args: 2) do |machine, args|
-          path = machine.read_wstring(args[0])
-          # Dump raw bytes for diagnosis
-          hex = machine.memory.read(args[0], 32).bytes.map { |b| format("%02x", b) }.join(" ")
-          warn format("[CreateDirectoryW] %s  raw_bytes=%s", path.inspect, hex)
-          Dir.mkdir(path)
+          guest_path = machine.read_wstring(args[0])
+          host_path = Api::WinFS.translate(machine.fs_root, guest_path)
+          warn format("[CreateDirectoryW] %s -> %s", guest_path.inspect, host_path)
+          FileUtils.mkdir_p(File.dirname(host_path))
+          Dir.mkdir(host_path)
           1
         rescue Errno::EEXIST
           1
@@ -225,9 +234,9 @@ module Exe32Rb
         end
 
         dispatcher.install_handler("kernel32.dll", "FindFirstFileW", args: 2) do |machine, args|
-          path = machine.read_wstring(args[0])
-          warn format("[FindFirstFileW] %s", path.inspect)
-          0xFFFF_FFFF # INVALID_HANDLE_VALUE — no matches (we have an empty fs)
+          guest_path = machine.read_wstring(args[0])
+          warn format("[FindFirstFileW] %s", guest_path.inspect)
+          0xFFFF_FFFF # INVALID_HANDLE_VALUE — we don't model directory enum
         end
 
         dispatcher.install_handler("kernel32.dll", "ExitProcess", args: 1) do |_machine, args|
@@ -605,6 +614,21 @@ module Exe32Rb
           ret
         end
         dispatcher.install_handler("kernel32.dll", "GetEnvironmentVariableW", args: 3, &get_env_w)
+        dispatcher.install_handler("kernel32.dll", "GetTempPathW", args: 2) do |machine, args|
+          cch = args[0] & 0xFFFF_FFFF
+          buf = args[1] & 0xFFFF_FFFF
+          val = "C:\\Temp\\"
+          encoded = +"".b
+          val.each_codepoint { |c| encoded << [c & 0xFFFF].pack("v") }
+          needed = encoded.bytesize / 2 + 1
+          if buf == 0 || cch < needed
+            needed
+          else
+            machine.memory.write(buf, encoded)
+            machine.memory.write_u16(buf + encoded.bytesize, 0)
+            needed - 1
+          end
+        end
         dispatcher.install_handler("kernel32.dll", "GetEnvironmentVariableA", args: 3) do |machine, args|
           # ASCII version — read with read_cstring, write ASCII.
           name = machine.read_cstring(args[0])

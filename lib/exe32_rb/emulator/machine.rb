@@ -25,6 +25,7 @@ module Exe32Rb
 
       attr_reader :image, :memory, :cpu, :decoder, :executor, :dispatcher,
                   :exit_code, :steps_executed, :mode, :halt_sentinel
+      attr_accessor :fs_root
 
       def initialize(image, trace: false)
         @image      = image

@@ -32,6 +32,9 @@ module Exe32Rb
         --delphi-memmgr=ADDR         replace the Delphi TMemoryManager record at ADDR
                                      with Ruby handlers (GetMem/FreeMem/Realloc...)
                                      e.g. --delphi-memmgr=0x41273C for Akimbo
+        --winfs[=DIR]                map guest C:\... paths into a sandbox dir on
+                                     host (default: <TMPDIR>/exe32_rb_root). All
+                                     CreateFile/Directory/Delete calls translate.
         --lenient                    unmapped reads return 0, writes are dropped
                                      (lets buggy guest code stumble forward)
         --max-steps N                cap the step count
@@ -93,6 +96,7 @@ module Exe32Rb
         end
         o.on("--watch=ADDR", String) { |s| (opts[:watches] ||= []) << Integer(s) }
         o.on("--delphi-memmgr=ADDR", String) { |s| opts[:delphi_memmgr] = Integer(s) }
+        o.on("--winfs[=DIR]", String) { |s| opts[:winfs] = s || :default }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -107,6 +111,14 @@ module Exe32Rb
       if opts[:delphi_memmgr]
         require "exe32_rb/api/delphi_memmgr"
         Exe32Rb::Api::DelphiMemMgr.install(machine, opts[:delphi_memmgr])
+      end
+      if opts[:winfs]
+        require "exe32_rb/api/win_fs"
+        if opts[:winfs] == :default
+          Exe32Rb::Api::WinFS.install(machine)
+        else
+          Exe32Rb::Api::WinFS.install(machine, root: opts[:winfs])
+        end
       end
 
       kw = {}
