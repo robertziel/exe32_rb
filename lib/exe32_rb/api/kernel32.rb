@@ -584,6 +584,45 @@ module Exe32Rb
           dispatcher.install_handler("kernel32.dll", fn, args: n_args) { |_, _| 1 }
         end
 
+        # CreateProcess* — pretend the child started, return a fake handle
+        # pair. Real exec is out of scope (would need to actually run a Win32
+        # binary; bail to "process exited cleanly with code 0" so the parent
+        # installer's wait/exit path can continue.
+        process_handle = 0x7000_0001
+        thread_handle  = 0x7000_0002
+        [%w[CreateProcessA 10], %w[CreateProcessW 10],
+         %w[CreateProcessAsUserA 11], %w[CreateProcessAsUserW 11]].each do |fn, n|
+          dispatcher.install_handler("kernel32.dll", fn, args: n.to_i) do |machine, args|
+            # PROCESS_INFORMATION is in args[9]: { hProcess, hThread, dwPid, dwTid }
+            pi = args[9] & 0xFFFF_FFFF rescue 0
+            if pi != 0
+              machine.memory.write_u32(pi +  0, process_handle)
+              machine.memory.write_u32(pi +  4, thread_handle)
+              machine.memory.write_u32(pi +  8, 0x1234)
+              machine.memory.write_u32(pi + 12, 0x5678)
+            end
+            warn "[CreateProcess] stub: pretending child ran cleanly"
+            1
+          end
+        end
+
+        # WaitForSingleObject — fake child immediately signaled.
+        dispatcher.install_handler("kernel32.dll", "WaitForSingleObject", args: 2) { |_, _| 0 }
+        dispatcher.install_handler("kernel32.dll", "WaitForSingleObjectEx", args: 3) { |_, _| 0 }
+        dispatcher.install_handler("kernel32.dll", "WaitForMultipleObjects", args: 4) { |_, _| 0 }
+
+        # GetExitCodeProcess — write 0 into the output pointer.
+        dispatcher.install_handler("kernel32.dll", "GetExitCodeProcess", args: 2) do |machine, args|
+          out = args[1] & 0xFFFF_FFFF
+          machine.memory.write_u32(out, 0) if out != 0
+          1
+        end
+        dispatcher.install_handler("kernel32.dll", "GetExitCodeThread", args: 2) do |machine, args|
+          out = args[1] & 0xFFFF_FFFF
+          machine.memory.write_u32(out, 0) if out != 0
+          1
+        end
+
         # Interlocked* — proper read-modify-write semantics on guest memory.
         # Single-threaded so atomicity is free; correctness matters because
         # Delphi RTL & FastMM use the return value (old value) for state.
