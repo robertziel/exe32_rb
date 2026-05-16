@@ -493,31 +493,59 @@ module Exe32Rb
         dispatcher.install_handler("user32.dll", "CharUpperBuffW", args: 2) { |_, args| args[1] & 0xFFFF_FFFF }
         dispatcher.install_handler("user32.dll", "CharLowerBuffW", args: 2) { |_, args| args[1] & 0xFFFF_FFFF }
 
-        dispatcher.install_handler("user32.dll", "MessageBoxW", args: 4) do |machine, args|
-          text = machine.read_wstring(args[1])
-          cap  = machine.read_wstring(args[2])
+        # Render the guest's MessageBox as a real ASCII dialog on stderr so
+        # we can see what the installer is saying. Returns the primary-button
+        # ID for the given MB_* style.
+        render_msgbox = lambda do |machine, args, wide:|
+          text = wide ? machine.read_wstring(args[1]) : machine.read_cstring(args[1])
+          cap  = wide ? machine.read_wstring(args[2]) : machine.read_cstring(args[2])
           type = args[3] & 0xFFFF_FFFF
-          warn format("[MessageBoxW] caption=%s text=%s type=0x%x", cap.inspect, text.inspect, type)
-          # Return the "primary" button for each MB_* style:
-          #   MB_OK            -> IDOK (1)
-          #   MB_OKCANCEL      -> IDOK (1)
-          #   MB_ABORTRETRYIGNORE -> IDRETRY (4)
-          #   MB_YESNOCANCEL   -> IDYES (6)
-          #   MB_YESNO         -> IDYES (6)
-          #   MB_RETRYCANCEL   -> IDRETRY (4)
+
+          buttons = case type & 0x0F
+                    when 0    then ["OK"]
+                    when 1    then ["OK", "Cancel"]
+                    when 2    then ["Abort", "Retry", "Ignore"]
+                    when 3    then ["Yes", "No", "Cancel"]
+                    when 4    then ["Yes", "No"]
+                    when 5    then ["Retry", "Cancel"]
+                    when 6    then ["Cancel", "Try Again", "Continue"]
+                    else ["OK"]
+                    end
+          icon = case (type >> 4) & 0xF
+                 when 1 then "[!]"
+                 when 2 then "[?]"
+                 when 3 then "[X]"
+                 when 4 then "[i]"
+                 else "[ ]"
+                 end
+
+          title_line = cap.empty? ? "(no caption)" : cap
+          body_lines = text.empty? ? ["(empty body)"] : text.split(/\r?\n/)
+          width = [title_line.length, *body_lines.map(&:length), buttons.join("  ").length + 8].max + 4
+          warn "+" + "-" * (width + 2) + "+"
+          warn "| #{icon} #{title_line.ljust(width - 4)} |"
+          warn "+" + "-" * (width + 2) + "+"
+          body_lines.each { |line| warn "|  #{line.ljust(width)} |" }
+          warn "|  #{("[" + buttons.first + "]  " + buttons[1..].map { |b| b }.join("  ")).ljust(width)} |"
+          warn "+" + "-" * (width + 2) + "+"
+          warn "  (auto-clicked #{buttons.first})"
+          warn ""
+
           case type & 0x0F
-          when 0, 1 then 1
-          when 2    then 4
-          when 3, 4 then 6
-          when 5    then 4
+          when 0, 1 then 1   # IDOK
+          when 2    then 4   # IDRETRY (first non-abort)
+          when 3, 4 then 6   # IDYES
+          when 5    then 4   # IDRETRY
+          when 6    then 11  # IDCONTINUE
           else 1
           end
         end
+
+        dispatcher.install_handler("user32.dll", "MessageBoxW", args: 4) do |machine, args|
+          render_msgbox.call(machine, args, wide: true)
+        end
         dispatcher.install_handler("user32.dll", "MessageBoxA", args: 4) do |machine, args|
-          text = machine.read_cstring(args[1])
-          cap  = machine.read_cstring(args[2])
-          warn format("[MessageBoxA] caption=%s text=%s", cap.inspect, text.inspect)
-          1
+          render_msgbox.call(machine, args, wide: false)
         end
 
         dispatcher.install_handler("kernel32.dll", "GetSystemInfo", args: 1) do |machine, args|

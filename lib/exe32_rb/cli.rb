@@ -14,6 +14,7 @@ module Exe32Rb
         dump    <file.exe>           print PE headers, sections, and imports
         run     <file.exe>           emulate the binary (i386 only)
         disasm  <file.exe>           disassemble N instructions from entry
+        strings <file.exe>           list all UI strings (RT_STRING) embedded in the binary
         hello   <out.exe>            write a minimal hello-world PE32
         version                      print exe32_rb version
 
@@ -43,6 +44,7 @@ module Exe32Rb
       when "dump"    then cmd_dump
       when "run"     then cmd_run
       when "disasm"  then cmd_disasm
+      when "strings" then cmd_strings
       when "hello"   then cmd_hello
       when "version" then puts(Exe32Rb::VERSION); 0
       when nil, "-h", "--help" then puts(USAGE); 0
@@ -126,6 +128,41 @@ module Exe32Rb
         instr = machine.decoder.decode(rip)
         puts instr.to_s
         rip = (rip + instr.length) & machine.cpu.address_mask
+      end
+      0
+    end
+
+    # Dump every UTF-16 string in the binary's RT_STRING resource table.
+    # No emulation required — pure read of the parsed PE resource tree.
+    def cmd_strings
+      path = @argv.shift or abort("strings requires a file path")
+      image = load_image(path)
+      string_tree = image.resources[6] # RT_STRING
+      unless string_tree
+        puts "(no RT_STRING resource)"
+        return 0
+      end
+
+      machine = Exe32Rb::Emulator::Machine.new(image).configure
+      string_tree.keys.sort.each do |block_id|
+        next unless block_id.is_a?(Integer)
+
+        resource = image.find_resource(6, block_id)
+        next unless resource
+
+        base = image.image_base + resource[:data_rva]
+        pos  = base
+        16.times do |i|
+          length = machine.memory.read_u16(pos)
+          pos += 2
+          if length > 0
+            bytes = machine.memory.read(pos, length * 2)
+            text  = bytes.force_encoding("UTF-16LE").encode("UTF-8")
+            uid   = (block_id - 1) * 16 + i
+            puts format("  [id %5d]  %s", uid, text)
+          end
+          pos += length * 2
+        end
       end
       0
     end
