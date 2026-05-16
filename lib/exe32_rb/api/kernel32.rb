@@ -338,17 +338,51 @@ module Exe32Rb
           0
         end
 
-        # Heap stubs (bump allocator hosted in scratch — fine for short-lived
-        # programs; not a real heap).
+        # Heap with FastMM-shaped headers. Delphi RTL bypasses the system
+        # heap when it owns memory, but for the few code paths that do read
+        # back kernel32 heap blocks, [ptr-4] must contain a "block size word"
+        # whose high bits encode size and low 4 bits encode flags. Without
+        # this, Delphi's validator pulls a bogus size and computes a
+        # nonsense trailing-tag address.
+        #
+        # Layout for each allocation:
+        #   [ptr-8]  reserved / next-pointer slot (zero)
+        #   [ptr-4]  rounded_size | flags   ; low 4 bits = 0 => "regular block"
+        #   [ptr..]  user bytes (rounded up to 16)
+        #   [ptr+size-4] trailing tag (zero)
+        heap_alloc = ->(machine, args) {
+          size = args[2] & 0xFFFF_FFFF
+          next 0 if size == 0
+
+          rounded = (size + 0xF) & ~0xF
+          # 16 bytes of header before, 8 bytes of trailer after
+          base = machine.scratch_alloc(rounded + 24, zero: true)
+          next 0 if base == 0
+
+          ret = base + 16
+          machine.memory.write_u32(ret - 4, rounded) # size word, flag bits = 0
+          ret
+        }
         dispatcher.install_handler("kernel32.dll", "HeapCreate", args: 3) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "HeapDestroy", args: 1) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "GetProcessHeap", args: 0) { |_, _| 1 }
-        dispatcher.install_handler("kernel32.dll", "HeapAlloc", args: 3) do |machine, args|
-          size = args[2] & 0xFFFF_FFFF
-          machine.scratch_alloc(size, zero: (args[1] & 0x8) != 0)
+        dispatcher.install_handler("kernel32.dll", "HeapAlloc",  args: 3, &heap_alloc)
+        dispatcher.install_handler("kernel32.dll", "LocalAlloc", args: 2) do |machine, args|
+          heap_alloc.call(machine, [0, args[0], args[1]])
         end
+        dispatcher.install_handler("kernel32.dll", "GlobalAlloc", args: 2) do |machine, args|
+          heap_alloc.call(machine, [0, args[0], args[1]])
+        end
+        dispatcher.install_handler("kernel32.dll", "LocalFree",  args: 1) { |_, _| 0 }
+        dispatcher.install_handler("kernel32.dll", "GlobalFree", args: 1) { |_, _| 0 }
         dispatcher.install_handler("kernel32.dll", "HeapFree", args: 3) { |_, _| 1 }
-        dispatcher.install_handler("kernel32.dll", "HeapSize", args: 3) { |_, _| 0 }
+        dispatcher.install_handler("kernel32.dll", "HeapSize", args: 3) do |machine, args|
+          ptr = args[2] & 0xFFFF_FFFF
+          ptr == 0 ? 0 : machine.memory.read_u32(ptr - 4) & 0xFFFF_FFF0
+        end
+        dispatcher.install_handler("kernel32.dll", "HeapReAlloc", args: 4) do |machine, args|
+          heap_alloc.call(machine, [0, args[1], args[3]])
+        end
 
         # Critical sections — no-ops for a single-threaded emulator.
         %w[InitializeCriticalSection DeleteCriticalSection
