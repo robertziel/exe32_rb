@@ -613,19 +613,28 @@ module Exe32Rb
           warn "| #{icon} #{title_line.ljust(width - 4)} |"
           warn "+" + "-" * (width + 2) + "+"
           body_lines.each { |line| warn "|  #{line.ljust(width)} |" }
-          warn "|  #{("[" + buttons.first + "]  " + buttons[1..].map { |b| b }.join("  ")).ljust(width)} |"
+          warn "|  #{(buttons.join("  ")).ljust(width)} |"
           warn "+" + "-" * (width + 2) + "+"
-          warn "  (auto-clicked #{buttons.first})"
-          warn ""
 
-          case type & 0x0F
-          when 0, 1 then 1   # IDOK
-          when 2    then 4   # IDRETRY (first non-abort)
-          when 3, 4 then 6   # IDYES
-          when 5    then 4   # IDRETRY
-          when 6    then 11  # IDCONTINUE
-          else 1
-          end
+          # Default to the "proceed" answer (OK / Yes / Continue / Retry).
+          # Real installers usually mean those as "use default and continue";
+          # picking the destructive answer ends the run earlier with less
+          # diagnostic value.
+          id = case type & 0x0F
+               when 0, 1 then 1   # IDOK
+               when 2    then 4   # IDRETRY
+               when 3, 4 then 6   # IDYES
+               when 5    then 4   # IDRETRY
+               when 6    then 11  # IDCONTINUE
+               else 1
+               end
+          # show what we actually returned, not just the first button
+          name_for = {1 => "OK", 2 => "Cancel", 3 => "Abort", 4 => "Retry",
+                      5 => "Ignore", 6 => "Yes", 7 => "No", 10 => "TryAgain",
+                      11 => "Continue"}
+          warn "  (auto-replied #{name_for[id] || id.to_s})"
+          warn ""
+          id
         end
 
         dispatcher.install_handler("user32.dll", "MessageBoxW", args: 4) do |machine, args|
