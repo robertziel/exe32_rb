@@ -43,6 +43,8 @@ module Exe32Rb
     autoload :DelphiMemMgr,  "exe32_rb/api/delphi_memmgr"
     autoload :WinFS,         "exe32_rb/api/win_fs"
     autoload :Com,           "exe32_rb/api/com"
+    autoload :DllLoader,     "exe32_rb/api/dll_loader"
+    autoload :DllLoaderInstall, "exe32_rb/api/dll_loader"
   end
 
   module Samples

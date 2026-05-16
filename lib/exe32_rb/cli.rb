@@ -101,6 +101,8 @@ module Exe32Rb
         o.on("--delphi-memmgr=ADDR", String) { |s| opts[:delphi_memmgr] = Integer(s) }
         o.on("--winfs[=DIR]", String) { |s| opts[:winfs] = s || :default }
         o.on("--com") { opts[:com] = true }
+        o.on("--load-dlls") { opts[:load_dlls] = true }
+        o.on("--dll-search=DIR", String) { |s| (opts[:dll_search] ||= []) << s }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -128,6 +130,10 @@ module Exe32Rb
       if opts[:com]
         require "exe32_rb/api/com"
         Exe32Rb::Api::Com.install(machine)
+      end
+      if opts[:load_dlls]
+        require "exe32_rb/api/dll_loader"
+        Exe32Rb::Api::DllLoaderInstall.install(machine, search_paths: opts[:dll_search] || [])
       end
 
       kw = {}

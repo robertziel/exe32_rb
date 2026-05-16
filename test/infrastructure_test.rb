@@ -189,6 +189,27 @@ class InfrastructureTest < Minitest::Test
     assert_equal [[0xBEEF, 0xCAFE]], captured
   end
 
+  # ----------------------------------------------------------------
+  # DLL loader (synthetic DLL)
+  # ----------------------------------------------------------------
+
+  def test_dll_loader_parses_synthetic_dll_exports
+    require "exe32_rb/api/dll_loader"
+    Dir.mktmpdir do |dir|
+      dll_path = File.join(dir, "test.dll")
+      File.binwrite(dll_path, build_synth_dll_with_export("foo", 0x12345))
+
+      machine = Exe32Rb::Emulator::Machine.new(synth_image)
+      machine.configure
+      loader = Exe32Rb::Api::DllLoader.new(machine)
+
+      base = loader.load(dll_path)
+      assert base > 0, "load should return non-zero base"
+      assert_equal base + 0x12345, loader.get_proc_address(base, "foo")
+      assert_equal 0, loader.get_proc_address(base, "nonexistent")
+    end
+  end
+
   def test_memory_write_callback_fires
     mem = Exe32Rb::Emulator::Memory.new
     mem.map(0x10000, 0x1000, name: "test")
@@ -262,6 +283,73 @@ class InfrastructureTest < Minitest::Test
     # .text content: just a RET
     text = "\xC3".b + ("\x00".b * (0x200 - 1))
     bytes << text
+    bytes
+  end
+
+  # Build a minimal PE DLL with one named export pointing to fn_rva.
+  def build_synth_dll_with_export(export_name, fn_rva)
+    section_alignment = 0x1000
+    file_alignment    = 0x200
+    text_rva = 0x1000
+    edata_rva = 0x2000
+    header_size = 0x400
+
+    # build .edata content: export directory + addr_funcs + addr_names +
+    # addr_name_ords + name string
+    funcs_rva = edata_rva + 40
+    names_rva = funcs_rva + 4
+    nameords_rva = names_rva + 4
+    name_str_rva = nameords_rva + 2
+    name_bytes = "#{export_name}\x00".b
+
+    edata = +"".b
+    edata << ([0, 0].pack("V V"))                  # Characteristics, TimeDateStamp
+    edata << ([0, 0].pack("v v"))                  # MajorVersion, MinorVersion
+    edata << ([0].pack("V"))                       # Name (DLL name RVA)
+    edata << ([1].pack("V"))                       # Base ordinal
+    edata << ([1, 1].pack("V V"))                  # NumberOfFunctions, NumberOfNames
+    edata << ([funcs_rva, names_rva, nameords_rva].pack("V V V"))
+    edata << ([fn_rva].pack("V"))                  # function RVAs
+    edata << ([name_str_rva].pack("V"))            # name RVAs
+    edata << ([0].pack("v"))                       # ordinal table
+    edata << name_bytes
+
+    # PE
+    bytes = +"".b
+    dos = ("\x00".b * 64); dos[0, 2] = "MZ"; dos[0x3C, 4] = [0x40].pack("V")
+    bytes << dos
+    bytes << "PE\x00\x00".b
+    bytes << [0x014C, 2, 0, 0, 0, 0x00E0, 0x2102].pack("v v V V V v v") # DLL flag (0x2000)
+
+    opt = +"".b
+    opt << [0x10B].pack("v") << [1, 0].pack("C C")
+    opt << [0x200].pack("V") << [0x200].pack("V") << [0].pack("V")
+    opt << [0].pack("V") << [text_rva].pack("V") << [edata_rva].pack("V")
+    opt << [0x60000000].pack("V") << [section_alignment].pack("V") << [file_alignment].pack("V")
+    opt << [4, 0].pack("v v") << [0, 0].pack("v v") << [4, 0].pack("v v")
+    opt << [0].pack("V") << [0x4000].pack("V") << [header_size].pack("V") << [0].pack("V")
+    opt << [2].pack("v") << [0].pack("v") # SubsystemGUI
+    opt << [0x10_0000].pack("V") << [0x1000].pack("V")
+    opt << [0x10_0000].pack("V") << [0x1000].pack("V")
+    opt << [0].pack("V") << [16].pack("V")
+    dirs = Array.new(16) { [0, 0] }
+    dirs[0] = [edata_rva, edata.bytesize] # EXPORT
+    dirs.each { |va, sz| opt << [va, sz].pack("V V") }
+    bytes << opt
+
+    # 2 section headers
+    bytes << ".text\x00\x00\x00".b
+    bytes << [1, text_rva, 0x200, header_size].pack("V V V V")
+    bytes << [0, 0].pack("V V") << [0, 0].pack("v v") << [0x60000020].pack("V")
+
+    bytes << ".edata\x00\x00".b
+    bytes << [edata.bytesize, edata_rva, 0x200, header_size + 0x200].pack("V V V V")
+    bytes << [0, 0].pack("V V") << [0, 0].pack("v v") << [0x40000040].pack("V")
+
+    bytes << ("\x00".b * (header_size - bytes.bytesize))
+    text = "\xC3".b + ("\x00".b * (0x200 - 1))
+    bytes << text
+    bytes << edata + ("\x00".b * (0x200 - edata.bytesize))
     bytes
   end
 
