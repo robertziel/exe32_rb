@@ -222,15 +222,25 @@ module Exe32Rb
 
         dispatcher.install_handler("kernel32.dll", "CreateDirectoryW", args: 2) do |machine, args|
           guest_path = machine.read_wstring(args[0])
+          if guest_path.empty?
+            dispatcher.set_last_error(123) # ERROR_INVALID_NAME
+            warn "[CreateDirectoryW] (empty path) -> failure"
+            next 0
+          end
           host_path = Api::WinFS.translate(machine.fs_root, guest_path)
           warn format("[CreateDirectoryW] %s -> %s", guest_path.inspect, host_path)
           FileUtils.mkdir_p(File.dirname(host_path))
-          Dir.mkdir(host_path)
+          begin
+            Dir.mkdir(host_path)
+          rescue Errno::EEXIST
+            dispatcher.set_last_error(183) # ERROR_ALREADY_EXISTS
+            next 0
+          rescue Errno::ENOENT, Errno::EACCES => e
+            dispatcher.set_last_error(e.is_a?(Errno::ENOENT) ? 3 : 5)
+            next 0
+          end
+          dispatcher.set_last_error(0)
           1
-        rescue Errno::EEXIST
-          1
-        rescue Errno::ENOENT, Errno::EACCES
-          0
         end
 
         dispatcher.install_handler("kernel32.dll", "FindFirstFileW", args: 2) do |machine, args|
@@ -402,12 +412,22 @@ module Exe32Rb
           0
         end
 
+        # Track LastError properly so Win32 error-check patterns work.
+        # Many Delphi code paths do: call API; if returns 0, GetLastError;
+        # if error == X then ...; without real LastError they loop or assume
+        # success-with-failure-marker.
+        last_error = 0
+        machine.define_singleton_method(:set_last_error) { |code| last_error = code & 0xFFFF_FFFF } if false
         dispatcher.install_handler("kernel32.dll", "GetLastError", args: 0) do |_machine, _args|
+          last_error
+        end
+        dispatcher.install_handler("kernel32.dll", "SetLastError", args: 1) do |_machine, args|
+          last_error = args[0] & 0xFFFF_FFFF
           0
         end
-
-        dispatcher.install_handler("kernel32.dll", "SetLastError", args: 1) do |_machine, _args|
-          0
+        # Expose last_error to other handlers via a method on the dispatcher.
+        dispatcher.define_singleton_method(:set_last_error) do |code|
+          last_error = code & 0xFFFF_FFFF
         end
 
         dispatcher.install_handler("kernel32.dll", "GetCommandLineA", args: 0) do |machine, _args|
@@ -581,7 +601,9 @@ module Exe32Rb
 
         # Misc.
         dispatcher.install_handler("kernel32.dll", "GetCommandLineW", args: 0) do |machine, _|
-          machine.scratch_strz_w("")
+          # Provide /SILENT so installer-style binaries skip GUI dialogs and
+          # use their non-interactive code path.
+          machine.scratch_strz_w("\"#{machine.image.path}\" /SILENT /SUPPRESSMSGBOXES /NOCANCEL")
         end
 
         # Environment variables — return sensible host paths for TEMP-ish ones.
