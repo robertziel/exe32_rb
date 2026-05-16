@@ -281,7 +281,9 @@ module Exe32Rb
         size = (size + 0xF) & ~0xF # 16-byte align
         addr = @scratch_cursor
         @scratch_cursor += size
-        @memory.write(addr, "\x00".b * size) if zero
+        # Pages are zero-initialized on first touch, and scratch is
+        # bump-only (no reuse), so the bytes here are already zero.
+        # The explicit memset was 80%+ of allocation cost in hot paths.
         addr
       end
 
