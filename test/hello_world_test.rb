@@ -32,6 +32,17 @@ class HelloWorldTest < Minitest::Test
     end
   end
 
+  def test_factorial_sample_returns_120
+    Dir.mktmpdir do |dir|
+      exe = File.join(dir, "fact.exe")
+      Exe32Rb::Samples::Factorial.write(exe)
+
+      machine = Exe32Rb::Machine.from_path(exe).configure
+      machine.run
+      assert_equal 120, machine.exit_code
+    end
+  end
+
   def test_machine_rejects_64bit_image
     Dir.mktmpdir do |dir|
       # Build a minimal x86_64 PE32+ header to confirm the gate.

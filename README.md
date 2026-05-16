@@ -1,9 +1,17 @@
 # exe32_rb
 
-Pure-Ruby emulator for 32-bit Windows PE executables. Loads a PE32 / i386
-`.exe`, maps its sections into a virtual address space, interprets x86
-instructions in 32-bit mode, and routes imported Windows API calls to
-Ruby handlers via the `__stdcall` / `__cdecl` conventions.
+Pure-Ruby emulator for 32-bit Windows PE executables, built as a
+**learning tool for understanding how x86 binaries actually run**.
+Loads a PE32 / i386 `.exe`, maps its sections into a virtual address
+space, interprets x86 instructions in 32-bit mode, and routes imported
+Windows API calls to Ruby handlers via the `__stdcall` / `__cdecl`
+conventions.
+
+The headline feature for learning is the `debug` REPL — step instruction
+by instruction through any PE32 binary, watch registers and flags
+change, set breakpoints, inspect memory and the stack. See the
+**[Learn x86 by stepping through it](#learn-x86-by-stepping-through-it)**
+section below for a hands-on walkthrough.
 
 The bundled `kernel32` handler set covers ~100 Win32 functions across
 `kernel32` / `user32` / `advapi32` / `oleaut32` / `comctl32` with sensible
@@ -17,6 +25,7 @@ $ ruby tools/build_hello.rb            # writes examples/hello.exe
 $ ./exe/exe32_rb dump   examples/hello.exe   # parse + print headers
 $ ./exe/exe32_rb disasm examples/hello.exe -n 20
 $ ./exe/exe32_rb run    examples/hello.exe   # -> Hello, world!
+$ ./exe/exe32_rb debug  examples/hello.exe   # interactive step-debugger
 ```
 
 CLI commands:
@@ -26,6 +35,8 @@ CLI commands:
 | `dump <file.exe>` | Print PE headers, sections, and imports |
 | `disasm <file.exe> [-n N]` | Disassemble N instructions from the entry point |
 | `run <file.exe>` | Emulate the binary |
+| `debug <file.exe>` | Drop into an interactive step-debugger REPL |
+| `strings <file.exe>` | List every UTF-16 string in the binary's RT_STRING table |
 | `hello <out.exe>` | Write a fresh minimal hello-world PE32 |
 | `version` | Print version |
 
@@ -35,8 +46,83 @@ CLI commands:
 | --- | --- |
 | `--trace` | Echo every instruction + API call to stderr |
 | `--stub-missing` | Install permissive stubs (correct arg counts) for every API in the signatures table; warn once per truly-unknown import |
-| `--call-stub=ADDR` | Redirect `call [ADDR]` to a return-1 thunk. Use to neutralize an in-binary memory-manager / vtable pointer that doesn't match our model. Repeatable. |
+| `--call-stub=ADDR[=RETVAL]` | Redirect `call [ADDR]` to a stub returning RETVAL (default 0). Repeatable. |
+| `--patch=ADDR=HEX` | Overwrite guest memory at ADDR with HEX bytes after load (repeatable). |
+| `--lenient` | Unmapped reads return 0; writes are dropped. Lets buggy code stumble forward. |
 | `--max-steps N` | Cap the step count (defaults to 10M) |
+
+## Learn x86 by stepping through it
+
+The `debug` command opens an interactive REPL that lets you single-step
+any PE32 binary, watching exactly how the CPU evolves. Try it on the
+bundled factorial sample — a recursive function that exercises the
+classic `push ebp / mov ebp,esp / ...` stack-frame pattern:
+
+```sh
+$ ruby -Ilib -rexe32_rb -e 'Exe32Rb::Samples::Factorial.write("examples/factorial.exe")'
+$ ./exe/exe32_rb debug examples/factorial.exe
+exe32_rb debugger — loaded factorial.exe
+  entry  0x00401022
+  rsp    0x700FFEFC
+  1 imports bound across 1 DLLs
+  type `help` for commands
+
+(exe32) d 4
+-> 0x00401022  6a 05                     push 0x5
+   0x00401024  e8 d7 ff ff ff            call rip-41
+   0x00401029  83 c4 04                  add esp, 0x4
+   0x0040102C  50                        push eax
+
+(exe32) s                  ; execute push 5
+-> 0x00401024  e8 d7 ff ff ff            call rip-41
+
+(exe32) stack              ; see the 5 on top of the stack
+  [esp+ 0]  0x700FFEF8 = 0x00000005 <- esp
+  ...
+
+(exe32) s                  ; step into factorial(5)
+-> 0x00401000  55                        push ebp
+
+(exe32) s                  ; push ebp
+(exe32) s                  ; mov ebp, esp
+(exe32) regs               ; new frame: ebp == esp
+  eax = 0x00000000    esi = 0x00000000
+  ebx = 0x00000000    edi = 0x00000000
+  ecx = 0x00000000    ebp = 0x700FFEF0
+  edx = 0x00000000    esp = 0x700FFEF0
+
+(exe32) c                  ; let it finish
+── halted, exit_code=120
+```
+
+The exit code is 120 = 5!.
+
+### Debugger commands
+
+```
+execution:                 inspection:
+  s, step                    r, regs        registers + flags
+  n, next  (step over CALL)  d, disasm [N]  N instructions from eip
+  c, continue                x ADDR [N]     N bytes of memory
+                             stack [N]      top N dwords from esp
+breakpoints:                 imports        list IAT imports
+  b   ADDR                   strings        dump RT_STRING resources
+  bd  ADDR
+  bl                         h, help        this help
+                             q, quit        exit
+```
+
+### Things to try at the REPL
+
+* `b 0x401029` then `c` — break after the recursive call returns and
+  inspect `eax` to see each partial result (5, 20, 60, 120 as the
+  recursion unwinds).
+* `disasm 30` from the entry point — read the prologue / epilogue
+  patterns and the recursive call's relative offset.
+* `strings examples/akimbo-or-any.exe` — dump the binary's UI text
+  without running a single instruction.
+* `imports` — see exactly which Win32 functions the binary depends on,
+  with the synthetic thunk addresses the dispatcher has bound.
 
 ## Host-backed file I/O
 

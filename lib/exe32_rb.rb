@@ -43,9 +43,11 @@ module Exe32Rb
   module Samples
     autoload :HelloWorld, "exe32_rb/samples/hello_world"
     autoload :HelloFile,  "exe32_rb/samples/hello_file"
+    autoload :Factorial,  "exe32_rb/samples/factorial"
   end
 
-  autoload :CLI, "exe32_rb/cli"
+  autoload :CLI,      "exe32_rb/cli"
+  autoload :Debugger, "exe32_rb/debugger"
 
   # Convenience: load a PE32 image and build a Machine ready to configure.run.
   # Rejects PE32+ / non-i386 images with a clear message.
