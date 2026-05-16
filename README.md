@@ -47,6 +47,8 @@ What's in the box:
 | Instruction breakpoints + memory watchpoints | ✅ | `--break`, `--watch` |
 | Hello-world / factorial / hello-file sample fixtures | ✅ | `lib/exe32_rb/samples/` |
 | Tier-3 basic-block JIT (Ruby source-gen via `eval`) | ✅ | `--jit` flag; `lib/exe32_rb/emulator/jit.rb` |
+| `InterlockedExchange/CompareExchange/Increment/Decrement` with real RMW semantics | ✅ | `lib/exe32_rb/api/kernel32.rb` |
+| `CreateProcess*` / `WaitForSingleObject*` / `GetExitCodeProcess` stubs | ✅ | Pretend child ran cleanly; cannot actually launch a Win32 child |
 
 What's *not* here (and won't realistically arrive in a single session):
 real DirectInput/DirectSound, real registry, real GUI message pump,
