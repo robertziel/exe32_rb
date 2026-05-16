@@ -533,6 +533,10 @@ module Exe32Rb
         # and the index within the block = id%16. Each string in the block is
         # prefixed by a 16-bit length (in chars), followed by UTF-16 data (no
         # null terminator in the on-disk form).
+        # Track recent string loads so empty MessageBoxes can show what the
+        # binary was trying to load. We keep the last 16 attempts.
+        recent_strings = []
+
         dispatcher.install_handler("user32.dll", "LoadStringW", args: 4) do |machine, args|
           uid = args[1] & 0xFFFF
           buf = args[2]
@@ -552,6 +556,14 @@ module Exe32Rb
           length = machine.memory.read_u16(pos)
           pos += 2
 
+          # Record the (id, decoded text) for later context display.
+          if length > 0
+            preview = machine.memory.read(pos, length * 2)
+                              .force_encoding("UTF-16LE").encode("UTF-8")
+            recent_strings << [uid, preview]
+            recent_strings.shift if recent_strings.size > 16
+          end
+
           if buf == 0 || cch == 0
             length
           else
@@ -561,6 +573,9 @@ module Exe32Rb
             copy
           end
         end
+
+        # Make the dialog renderer able to consult recent_strings.
+        machine_recent_strings_proc = -> { recent_strings.dup }
 
         # Log MessageBoxW text so we can see what the installer is trying to
         # tell the (absent) user. Returns IDOK (1) so callers proceed.
@@ -608,11 +623,30 @@ module Exe32Rb
 
           title_line = cap.empty? ? "(no caption)" : cap
           body_lines = text.empty? ? ["(empty body)"] : text.split(/\r?\n/)
-          width = [title_line.length, *body_lines.map(&:length), buttons.join("  ").length + 8].max + 4
+
+          # If the body is empty, add a context block: the binary couldn't
+          # populate this dialog because its Delphi RTL resource-string
+          # table wasn't initialized. Show recent LoadStringW lookups so
+          # the user can see what kinds of messages this binary uses.
+          context_lines = []
+          if text.empty?
+            recent = machine_recent_strings_proc.call.last(6)
+            unless recent.empty?
+              context_lines << ""
+              context_lines << "Recent strings the binary loaded (LoadStringW):"
+              recent.each do |uid, preview|
+                trimmed = preview.length > 60 ? preview[0, 57] + "..." : preview
+                context_lines << format("  [%5d]  %s", uid, trimmed)
+              end
+            end
+          end
+
+          all_body = body_lines + context_lines
+          width = [title_line.length, *all_body.map(&:length), buttons.join("  ").length + 8].max + 4
           warn "+" + "-" * (width + 2) + "+"
           warn "| #{icon} #{title_line.ljust(width - 4)} |"
           warn "+" + "-" * (width + 2) + "+"
-          body_lines.each { |line| warn "|  #{line.ljust(width)} |" }
+          all_body.each { |line| warn "|  #{line.ljust(width)} |" }
           warn "|  #{(buttons.join("  ")).ljust(width)} |"
           warn "+" + "-" * (width + 2) + "+"
 
