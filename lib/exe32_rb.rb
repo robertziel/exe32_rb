@@ -45,6 +45,7 @@ module Exe32Rb
     autoload :Com,           "exe32_rb/api/com"
     autoload :DllLoader,     "exe32_rb/api/dll_loader"
     autoload :DllLoaderInstall, "exe32_rb/api/dll_loader"
+    autoload :DirectDraw,    "exe32_rb/api/directdraw"
   end
 
   module Samples

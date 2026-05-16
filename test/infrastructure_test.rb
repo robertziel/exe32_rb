@@ -210,6 +210,34 @@ class InfrastructureTest < Minitest::Test
     end
   end
 
+  # ----------------------------------------------------------------
+  # DirectDraw bridge
+  # ----------------------------------------------------------------
+
+  def test_directdraw_creates_surface_and_framebuffer
+    require "exe32_rb/api/directdraw"
+    machine = Exe32Rb::Emulator::Machine.new(synth_image)
+    machine.configure
+    Exe32Rb::Api::DirectDraw.install(machine)
+
+    # Force the IDirectDraw7 object creation
+    ddraw_obj = Exe32Rb::Api::Com.get_or_create_object(
+      Exe32Rb::Api::DirectDraw::IID_IDirectDraw7
+    )
+    assert ddraw_obj > 0
+
+    surface_obj = Exe32Rb::Api::Com.get_or_create_object(
+      Exe32Rb::Api::DirectDraw::IID_IDirectDrawSurface7
+    )
+    assert surface_obj > 0
+
+    fb = Exe32Rb::Api::DirectDraw.framebuffer_addr
+    assert fb > 0
+    # write a pixel and read it back
+    machine.memory.write_u32(fb, 0xFF00FF00)
+    assert_equal 0xFF00FF00, machine.memory.read_u32(fb)
+  end
+
   def test_memory_write_callback_fires
     mem = Exe32Rb::Emulator::Memory.new
     mem.map(0x10000, 0x1000, name: "test")

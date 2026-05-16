@@ -103,6 +103,7 @@ module Exe32Rb
         o.on("--com") { opts[:com] = true }
         o.on("--load-dlls") { opts[:load_dlls] = true }
         o.on("--dll-search=DIR", String) { |s| (opts[:dll_search] ||= []) << s }
+        o.on("--directdraw") { opts[:directdraw] = true }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -134,6 +135,10 @@ module Exe32Rb
       if opts[:load_dlls]
         require "exe32_rb/api/dll_loader"
         Exe32Rb::Api::DllLoaderInstall.install(machine, search_paths: opts[:dll_search] || [])
+      end
+      if opts[:directdraw]
+        require "exe32_rb/api/directdraw"
+        Exe32Rb::Api::DirectDraw.install(machine)
       end
 
       kw = {}
