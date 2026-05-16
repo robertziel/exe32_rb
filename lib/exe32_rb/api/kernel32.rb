@@ -631,20 +631,55 @@ module Exe32Rb
         # pair. Real exec is out of scope (would need to actually run a Win32
         # binary; bail to "process exited cleanly with code 0" so the parent
         # installer's wait/exit path can continue.
+        #
+        # Before stubbing, log the child path (so users know what was
+        # extracted), and copy the binary to /tmp/exe32_rb_inner.exe so
+        # you can re-run it through exe32_rb with --gui to actually see
+        # the inner installer's window.
         process_handle = 0x7000_0001
         thread_handle  = 0x7000_0002
-        [%w[CreateProcessA 10], %w[CreateProcessW 10],
-         %w[CreateProcessAsUserA 11], %w[CreateProcessAsUserW 11]].each do |fn, n|
+        capture_child_binary = lambda do |machine, app_path|
+          # Translate winfs path → host path. If WinFS isn't installed,
+          # translate() returns the original string unchanged.
+          host_path = Api::WinFS.translate(machine.fs_root, app_path) rescue app_path
+          return nil unless host_path && File.exist?(host_path)
+          dest = ENV["EXE32_RB_INNER_DEST"] || "/tmp/exe32_rb_inner.exe"
+          require "fileutils"
+          FileUtils.cp(host_path, dest) rescue nil
+          dest
+        end
+        [%w[CreateProcessA 10 a], %w[CreateProcessW 10 w],
+         %w[CreateProcessAsUserA 11 a], %w[CreateProcessAsUserW 11 w]].each do |fn, n, charset|
           dispatcher.install_handler("kernel32.dll", fn, args: n.to_i) do |machine, args|
-            # PROCESS_INFORMATION is in args[9]: { hProcess, hThread, dwPid, dwTid }
-            pi = args[9] & 0xFFFF_FFFF rescue 0
+            offset = fn.start_with?("CreateProcessAsUser") ? 1 : 0
+            app_ptr = args[offset] & 0xFFFF_FFFF
+            cmd_ptr = args[offset + 1] & 0xFFFF_FFFF
+            app_path = if app_ptr == 0
+                         nil
+                       elsif charset == "w"
+                         machine.read_wstring(app_ptr) rescue nil
+                       else
+                         machine.read_cstring(app_ptr) rescue nil
+                       end
+            cmd_line = if cmd_ptr == 0
+                         nil
+                       elsif charset == "w"
+                         machine.read_wstring(cmd_ptr) rescue nil
+                       else
+                         machine.read_cstring(cmd_ptr) rescue nil
+                       end
+            warn format("[%s] app=%s cmd=%s", fn, app_path.inspect, cmd_line.inspect)
+            saved = capture_child_binary.call(machine, app_path) if app_path
+            warn "  -> captured inner binary to #{saved}" if saved
+
+            # PROCESS_INFORMATION is in args[9] (or args[10] for AsUser).
+            pi = args[fn.start_with?("CreateProcessAsUser") ? 10 : 9] & 0xFFFF_FFFF rescue 0
             if pi != 0
               machine.memory.write_u32(pi +  0, process_handle)
               machine.memory.write_u32(pi +  4, thread_handle)
               machine.memory.write_u32(pi +  8, 0x1234)
               machine.memory.write_u32(pi + 12, 0x5678)
             end
-            warn "[CreateProcess] stub: pretending child ran cleanly"
             1
           end
         end

@@ -152,7 +152,9 @@ module Exe32Rb
       end
       if opts[:gui]
         require "exe32_rb/api/user32"
+        require "exe32_rb/api/gdi32"
         Exe32Rb::Api::User32.install(machine)
+        Exe32Rb::Api::Gdi32.install(machine)
       end
 
       kw = {}

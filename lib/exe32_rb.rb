@@ -48,6 +48,7 @@ module Exe32Rb
     autoload :DllLoaderInstall, "exe32_rb/api/dll_loader"
     autoload :DirectDraw,    "exe32_rb/api/directdraw"
     autoload :User32,        "exe32_rb/api/user32"
+    autoload :Gdi32,         "exe32_rb/api/gdi32"
   end
 
   module Samples

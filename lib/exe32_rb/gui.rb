@@ -162,6 +162,19 @@ module Exe32Rb
       dismiss.pop
     end
 
+    # GDI paint queue. paint_rect/paint_text record the operation so the
+    # main thread can issue the corresponding Ruby2D primitive on the
+    # next tick. When there's no GUI (headless), they're silent no-ops.
+    def paint_rect(hwnd, x, y, w, h, color_rgb)
+      return unless @ruby2d_alive
+      enqueue_command([:paint_rect, hwnd, x, y, w, h, color_rgb], nil)
+    end
+
+    def paint_text(hwnd, x, y, text, color: 0)
+      return unless @ruby2d_alive
+      enqueue_command([:paint_text, hwnd, x, y, text, color], nil)
+    end
+
     def want_quit?
       @want_quit
     end
@@ -289,8 +302,9 @@ module Exe32Rb
         if cmd.is_a?(Array)
           op = cmd[0]
           case op
-          when :message_box
-            handle_message_box_command(*cmd[1..])
+          when :message_box then handle_message_box_command(*cmd[1..])
+          when :paint_rect  then handle_paint_rect_command(*cmd[1..])
+          when :paint_text  then handle_paint_text_command(*cmd[1..])
           end
         else
           send(:"handle_#{cmd}_command", hwnd)
@@ -313,6 +327,24 @@ module Exe32Rb
         overlay.remove rescue nil
         dismiss_queue.push(:ok)
       end
+    end
+
+    # Convert a COLORREF (0x00BBGGRR) into Ruby2D's [r, g, b, 1] form.
+    def colorref_to_rgba(c)
+      r = (c & 0xFF) / 255.0
+      g = ((c >> 8)  & 0xFF) / 255.0
+      b = ((c >> 16) & 0xFF) / 255.0
+      [r, g, b, 1.0]
+    end
+
+    def handle_paint_rect_command(_hwnd, x, y, w, h, color)
+      Ruby2D::Rectangle.new(x: x, y: y, width: w, height: h,
+                            color: colorref_to_rgba(color))
+    end
+
+    def handle_paint_text_command(_hwnd, x, y, text, color)
+      Ruby2D::Text.new(text, x: x, y: y, size: 14,
+                       color: colorref_to_rgba(color))
     end
   end
 end
