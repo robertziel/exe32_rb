@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "tmpdir"
+
 module Exe32Rb
   module Api
     # Minimal kernel32.dll surface — enough to take a CRT-less hello-world
@@ -211,11 +213,13 @@ module Exe32Rb
 
         dispatcher.install_handler("kernel32.dll", "CreateDirectoryW", args: 2) do |machine, args|
           path = machine.read_wstring(args[0])
-          warn format("[CreateDirectoryW] %s", path.inspect)
+          # Dump raw bytes for diagnosis
+          hex = machine.memory.read(args[0], 32).bytes.map { |b| format("%02x", b) }.join(" ")
+          warn format("[CreateDirectoryW] %s  raw_bytes=%s", path.inspect, hex)
           Dir.mkdir(path)
           1
         rescue Errno::EEXIST
-          1 # already exists — treat as success for installers
+          1
         rescue Errno::ENOENT, Errno::EACCES
           0
         end
@@ -290,6 +294,21 @@ module Exe32Rb
           flags = args[1] & 0xFFFF_FFFF
           nargs = args[2] & 0xFFFF_FFFF
           argp  = args[3] & 0xFFFF_FFFF
+
+          # Delphi-RTL exceptions (EXCEPTION_DELPHI* codes) pass a Delphi
+          # Exception object pointer in args. The object's structure starts
+          # with a vtable pointer; field +4 is FMessage (an AnsiString or
+          # UnicodeString — pointer to chars with length at [ptr-4]).
+          if code == 0x0EEDFADE && nargs >= 1 && argp != 0
+            obj = machine.memory.read_u32(argp)
+            if obj != 0
+              msg_ptr = machine.memory.read_u32(obj + 4)
+              if msg_ptr != 0
+                msg_text = machine.read_wstring(msg_ptr)
+                warn format("[Delphi Exception] message=%s", msg_text.inspect) unless msg_text.empty?
+              end
+            end
+          end
 
           # Read the head of the SEH chain from the TIB (FS:[0]).
           frame = machine.memory.read_u32(machine.cpu.fs_base + 0)
@@ -544,6 +563,61 @@ module Exe32Rb
         # Misc.
         dispatcher.install_handler("kernel32.dll", "GetCommandLineW", args: 0) do |machine, _|
           machine.scratch_strz_w("")
+        end
+
+        # Environment variables — return sensible host paths for TEMP-ish ones.
+        # An installer that gets TEMP="" can't build paths like "TEMP\is-NN.tmp"
+        # and falls into bad code paths.
+        # Synthetic Windows-style paths. The guest will mix these into its
+        # own concatenations and we want the result to look like a Windows
+        # path. We translate back to host paths at file-I/O time elsewhere.
+        env_overrides = {
+          "TEMP"         => "C:\\Temp",
+          "TMP"          => "C:\\Temp",
+          "USERPROFILE"  => "C:\\Users\\exe32_rb",
+          "APPDATA"      => "C:\\Users\\exe32_rb\\AppData\\Roaming",
+          "LOCALAPPDATA" => "C:\\Users\\exe32_rb\\AppData\\Local",
+          "PROGRAMFILES" => "C:\\Program Files",
+          "PROGRAMFILES(X86)" => "C:\\Program Files (x86)",
+          "WINDIR"       => "C:\\Windows",
+          "SYSTEMROOT"   => "C:\\Windows",
+          "COMSPEC"      => "C:\\Windows\\system32\\cmd.exe",
+          "PATH"         => "C:\\Windows;C:\\Windows\\system32",
+        }
+        get_env_w = lambda do |machine, args|
+          name = machine.read_wstring(args[0])
+          val  = env_overrides[name.upcase] || ENV[name] || ""
+          buf  = args[1] & 0xFFFF_FFFF
+          cch  = args[2] & 0xFFFF_FFFF
+
+          encoded = +"".b
+          val.each_codepoint { |c| encoded << [c & 0xFFFF].pack("v") }
+          needed = encoded.bytesize / 2 + 1 # include null terminator
+          ret = if buf == 0 || cch < needed
+                  needed
+                else
+                  machine.memory.write(buf, encoded)
+                  machine.memory.write_u16(buf + encoded.bytesize, 0)
+                  needed - 1
+                end
+          warn format("[GetEnvironmentVariableW] %s -> %s (buf=0x%x cch=%d ret=%d)",
+                       name.inspect, val.inspect, buf, cch, ret)
+          ret
+        end
+        dispatcher.install_handler("kernel32.dll", "GetEnvironmentVariableW", args: 3, &get_env_w)
+        dispatcher.install_handler("kernel32.dll", "GetEnvironmentVariableA", args: 3) do |machine, args|
+          # ASCII version — read with read_cstring, write ASCII.
+          name = machine.read_cstring(args[0])
+          val  = env_overrides[name.upcase] || ENV[name] || ""
+          buf  = args[1] & 0xFFFF_FFFF
+          cch  = args[2] & 0xFFFF_FFFF
+          needed = val.bytesize + 1
+          if buf == 0 || cch < needed
+            needed
+          else
+            machine.memory.write(buf, val + "\x00")
+            needed - 1
+          end
         end
         dispatcher.install_handler("kernel32.dll", "GetStartupInfoA", args: 1) { |_, _| 0 }
         dispatcher.install_handler("kernel32.dll", "GetStartupInfoW", args: 1) { |_, _| 0 }
