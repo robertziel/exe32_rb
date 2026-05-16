@@ -185,7 +185,10 @@ PE::Loader  ->  PE::Image  ->  Emulator::Machine
   for ~100 Win32 functions. `--stub-missing` uses this so unhandled
   calls don't drift the `__stdcall` stack.
 
-## Running real-world binaries (Delphi installers etc.)
+## Running real-world binaries (Delphi installers, etc.)
+
+For non-trivial binaries the runtime provides incremental opt-ins so
+you can push a binary as far as it'll go without modifying it on disk.
 
 For binaries that are more than a hello-world, the runtime offers
 several escalating tools:
@@ -219,6 +222,8 @@ What each flag does:
   for short-circuiting a known-bad function with a `C3` (RET) byte.
 * **`--watch=ADDR`** — log every write touching ADDR with the current
   EIP and full register dump. Finds the instruction that corrupted state.
+* **`--break=ADDR`** — log register state every time EIP hits ADDR.
+  Confirms whether a specific function is called and with what args.
 * **`--delphi-memmgr=ADDR`** — replace Delphi's 6-slot TMemoryManagerEx
   record (at ADDR) with Ruby `GetMem`/`FreeMem`/`ReallocMem`/`AllocMem`
   handlers. The biggest single-flag leap for any Delphi 2009+ binary —
