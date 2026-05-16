@@ -97,6 +97,45 @@ class InfrastructureTest < Minitest::Test
   end
 
   # ----------------------------------------------------------------
+  # SEH dispatch end-to-end
+  # ----------------------------------------------------------------
+
+  def test_seh_dispatch_redirects_eip_to_handler_on_fault
+    # Build a tiny synthetic Machine with a tiny "binary" image and
+    # a single SEH frame installed at FS:[0]. Trigger a fault, watch
+    # rip jump to the handler we installed.
+    machine = Exe32Rb::Emulator::Machine.new(synth_image)
+    machine.send(:map_image_for_test) if machine.respond_to?(:map_image_for_test)
+    # Use the regular configure path: we need stack, scratch, TIB, etc.
+    machine.configure
+
+    # Reserve a thunk address in code that will be our SEH handler.
+    handler_addr = 0x00500000
+    machine.memory.map(handler_addr & ~0xFFF, 0x1000, name: "handler")
+    # Plant a single RET at handler_addr so the handler immediately
+    # returns (eax = whatever the test sets; we'll set to 0).
+    machine.memory.write(handler_addr, [0x33, 0xC0, 0xC3].pack("C*")) # xor eax, eax; ret
+
+    # Install an SEH frame on the stack: { prev, handler }
+    frame_addr = machine.cpu.rsp - 8
+    machine.memory.write_u32(frame_addr,     0xFFFF_FFFF) # prev = end of chain
+    machine.memory.write_u32(frame_addr + 4, handler_addr)
+    machine.memory.write_u32(machine.cpu.fs_base, frame_addr)
+
+    # Trigger an exception dispatch.
+    ok = machine.raise_guest_exception(0xC0000005, [0x00000000])
+    assert ok, "raise_guest_exception should succeed when chain is non-empty"
+    assert_equal handler_addr, machine.cpu.rip, "EIP should jump to handler"
+  end
+
+  def test_seh_dispatch_returns_false_when_chain_is_empty
+    machine = Exe32Rb::Emulator::Machine.new(synth_image)
+    machine.configure
+    # FS:[0] is initialized to 0xFFFFFFFF by configure
+    refute machine.raise_guest_exception(0xC0000005)
+  end
+
+  # ----------------------------------------------------------------
   # Memory#write_callback fires
   # ----------------------------------------------------------------
 
@@ -123,6 +162,57 @@ class InfrastructureTest < Minitest::Test
     mem = Exe32Rb::Emulator::Memory.new
     mem.map(0x7000_0000, 0x10000, name: "stack")
     Struct.new(:cpu, :memory).new(cpu, mem)
+  end
+
+  # A complete, in-memory PE32 image just sufficient for Machine.configure:
+  # writes a tiny .text section with a single RET to a temp file so
+  # map_image's File.binread doesn't fail.
+  def synth_image
+    @synth_tmpdir ||= Dir.mktmpdir("synth")
+    path = File.join(@synth_tmpdir, "synth.exe")
+    File.binwrite(path, build_minimal_pe_bytes) unless File.exist?(path)
+    Exe32Rb::PE::Loader.load(path)
+  end
+
+  def build_minimal_pe_bytes
+    # Build the smallest possible PE32 that the loader accepts and
+    # Machine.configure can map. .text has just one byte (a RET).
+    section_alignment = 0x1000
+    file_alignment    = 0x200
+    text_rva   = 0x1000
+    header_size = 0x200
+
+    bytes = +"".b
+    dos = ("\x00".b * 64); dos[0, 2] = "MZ"; dos[0x3C, 4] = [0x40].pack("V")
+    bytes << dos
+    bytes << "PE\x00\x00".b
+    bytes << [0x014C, 1, 0, 0, 0, 0x00E0, 0x0102].pack("v v V V V v v")
+
+    opt = +"".b
+    opt << [0x10B].pack("v") << [1, 0].pack("C C")
+    opt << [0x200].pack("V") << [0].pack("V") << [0].pack("V")
+    opt << [text_rva].pack("V") << [text_rva].pack("V") << [0].pack("V")
+    opt << [0x00400000].pack("V") << [section_alignment].pack("V") << [file_alignment].pack("V")
+    opt << [4, 0].pack("v v") << [0, 0].pack("v v") << [4, 0].pack("v v")
+    opt << [0].pack("V") << [0x2000].pack("V") << [header_size].pack("V") << [0].pack("V")
+    opt << [3].pack("v") << [0].pack("v")
+    opt << [0x10_0000].pack("V") << [0x1000].pack("V")
+    opt << [0x10_0000].pack("V") << [0x1000].pack("V")
+    opt << [0].pack("V") << [16].pack("V")
+    16.times { opt << [0, 0].pack("V V") }
+    bytes << opt
+
+    # one section header (.text)
+    bytes << ".text\x00\x00\x00".b
+    bytes << [1, text_rva, 0x200, header_size].pack("V V V V")
+    bytes << [0, 0].pack("V V") << [0, 0].pack("v v")
+    bytes << [0x60000020].pack("V")
+
+    bytes << ("\x00".b * (header_size - bytes.bytesize))
+    # .text content: just a RET
+    text = "\xC3".b + ("\x00".b * (0x200 - 1))
+    bytes << text
+    bytes
   end
 
   def build_minimal_image
