@@ -42,6 +42,7 @@ module Exe32Rb
     autoload :Signatures,    "exe32_rb/api/signatures"
     autoload :DelphiMemMgr,  "exe32_rb/api/delphi_memmgr"
     autoload :WinFS,         "exe32_rb/api/win_fs"
+    autoload :Com,           "exe32_rb/api/com"
   end
 
   module Samples

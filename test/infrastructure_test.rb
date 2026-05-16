@@ -139,6 +139,56 @@ class InfrastructureTest < Minitest::Test
   # Memory#write_callback fires
   # ----------------------------------------------------------------
 
+  # ----------------------------------------------------------------
+  # COM stub framework
+  # ----------------------------------------------------------------
+
+  def test_com_get_or_create_object_returns_object_with_vtable
+    require "exe32_rb/api/com"
+    machine = Exe32Rb::Emulator::Machine.new(synth_image)
+    machine.configure
+    Exe32Rb::Api::Com.install(machine)
+
+    obj = Exe32Rb::Api::Com.get_or_create_object("42424242-4242-4242-4242-424242424242")
+    assert obj > 0, "object pointer should be non-zero"
+    vtable = machine.memory.read_u32(obj)
+    assert vtable > 0, "vtable pointer should be non-zero"
+
+    # Each vtable slot is a thunk address dispatchable by the dispatcher.
+    32.times do |slot|
+      thunk = machine.memory.read_u32(vtable + slot * 4)
+      assert machine.dispatcher.thunk?(thunk),
+             "vtable[#{slot}] (0x#{thunk.to_s(16)}) should be a registered thunk"
+    end
+  end
+
+  def test_com_register_method_overrides_default_stub
+    require "exe32_rb/api/com"
+    machine = Exe32Rb::Emulator::Machine.new(synth_image)
+    machine.configure
+    Exe32Rb::Api::Com.install(machine)
+
+    iid = "ABCDABCD-1234-5678-9ABC-DEF012345678"
+    captured = []
+    Exe32Rb::Api::Com.register_method(iid, 7, "DoSomething", args: 2) do |_m, args|
+      captured << args.dup
+      0
+    end
+
+    obj = Exe32Rb::Api::Com.get_or_create_object(iid)
+    vtable = machine.memory.read_u32(obj)
+    thunk = machine.memory.read_u32(vtable + 7 * 4)
+
+    # Simulate __stdcall: push `this`, arg1, arg2 then a return address;
+    # the dispatcher's read_args pulls args from [esp+4..]
+    machine.cpu.push32(machine.memory, 0xCAFE)     # arg2
+    machine.cpu.push32(machine.memory, 0xBEEF)     # arg1
+    machine.cpu.push32(machine.memory, obj)        # `this`
+    machine.cpu.push32(machine.memory, 0x12345)    # return addr
+    machine.dispatcher.invoke(thunk, machine)
+    assert_equal [[0xBEEF, 0xCAFE]], captured
+  end
+
   def test_memory_write_callback_fires
     mem = Exe32Rb::Emulator::Memory.new
     mem.map(0x10000, 0x1000, name: "test")

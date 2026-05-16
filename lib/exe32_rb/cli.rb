@@ -100,6 +100,7 @@ module Exe32Rb
         o.on("--break=ADDR", String) { |s| (opts[:breaks]  ||= []) << Integer(s) }
         o.on("--delphi-memmgr=ADDR", String) { |s| opts[:delphi_memmgr] = Integer(s) }
         o.on("--winfs[=DIR]", String) { |s| opts[:winfs] = s || :default }
+        o.on("--com") { opts[:com] = true }
         o.on("--lenient") { opts[:lenient] = true }
       end.parse!(@argv)
       path = @argv.shift or abort("run requires a file path")
@@ -123,6 +124,10 @@ module Exe32Rb
         else
           Exe32Rb::Api::WinFS.install(machine, root: opts[:winfs])
         end
+      end
+      if opts[:com]
+        require "exe32_rb/api/com"
+        Exe32Rb::Api::Com.install(machine)
       end
 
       kw = {}
