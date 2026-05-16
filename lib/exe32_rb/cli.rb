@@ -11,12 +11,13 @@ module Exe32Rb
       usage: exe32_rb <command> [options]
 
       commands:
-        dump    <file.exe>           print PE headers, sections, and imports
-        run     <file.exe>           emulate the binary (i386 only)
-        debug   <file.exe>           interactive step-debugger (step/break/registers/memory)
-        disasm  <file.exe>           disassemble N instructions from entry
-        strings <file.exe>           list all UI strings (RT_STRING) embedded in the binary
-        hello   <out.exe>            write a minimal hello-world PE32
+        dump      <file.exe>         print PE headers, sections, and imports
+        run       <file.exe>         emulate the binary (i386 only)
+        debug     <file.exe>         interactive step-debugger (step/break/registers/memory)
+        visualize <file.exe>         live Ruby2D window showing regs/disasm/stack/log
+        disasm    <file.exe>         disassemble N instructions from entry
+        strings   <file.exe>         list all UI strings (RT_STRING) embedded in the binary
+        hello     <out.exe>          write a minimal hello-world PE32
         version                      print exe32_rb version
 
       run options:
@@ -42,13 +43,14 @@ module Exe32Rb
     def run
       command = @argv.shift
       case command
-      when "dump"    then cmd_dump
-      when "run"     then cmd_run
-      when "debug"   then cmd_debug
-      when "disasm"  then cmd_disasm
-      when "strings" then cmd_strings
-      when "hello"   then cmd_hello
-      when "version" then puts(Exe32Rb::VERSION); 0
+      when "dump"      then cmd_dump
+      when "run"       then cmd_run
+      when "debug"     then cmd_debug
+      when "visualize" then cmd_visualize
+      when "disasm"    then cmd_disasm
+      when "strings"   then cmd_strings
+      when "hello"     then cmd_hello
+      when "version"   then puts(Exe32Rb::VERSION); 0
       when nil, "-h", "--help" then puts(USAGE); 0
       else
         warn "unknown command: #{command}"
@@ -131,6 +133,28 @@ module Exe32Rb
         puts instr.to_s
         rip = (rip + instr.length) & machine.cpu.address_mask
       end
+      0
+    end
+
+    # Drop into the Ruby2D live visualizer window. Requires the ruby2d gem
+    # (`gem install ruby2d`).
+    def cmd_visualize
+      opts = {stub_missing: false, call_stubs: []}
+      OptionParser.new do |o|
+        o.on("--stub-missing")  { opts[:stub_missing] = true }
+        o.on("--call-stub=ADDR[=RETVAL]", String) do |s|
+          addr_str, ret_str = s.split("=", 2)
+          opts[:call_stubs] << [Integer(addr_str), ret_str ? Integer(ret_str) : 0]
+        end
+      end.parse!(@argv)
+      path = @argv.shift or abort("visualize requires a file path")
+
+      image = load_image(path)
+      machine = Exe32Rb::Emulator::Machine.new(image).configure
+      install_stub_missing(machine) if opts[:stub_missing]
+      install_call_stubs(machine, opts[:call_stubs])
+      require "exe32_rb/visualizer"
+      Exe32Rb::Visualizer.new(machine).run
       0
     end
 

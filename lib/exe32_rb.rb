@@ -46,8 +46,9 @@ module Exe32Rb
     autoload :Factorial,  "exe32_rb/samples/factorial"
   end
 
-  autoload :CLI,      "exe32_rb/cli"
-  autoload :Debugger, "exe32_rb/debugger"
+  autoload :CLI,        "exe32_rb/cli"
+  autoload :Debugger,   "exe32_rb/debugger"
+  autoload :Visualizer, "exe32_rb/visualizer"
 
   # Convenience: load a PE32 image and build a Machine ready to configure.run.
   # Rejects PE32+ / non-i386 images with a clear message.
