@@ -18,6 +18,69 @@ The bundled `kernel32` handler set covers ~100 Win32 functions across
 defaults, plus real host-backed `CreateFileW` / `ReadFile` / `WriteFile` /
 `CloseHandle` (so the guest's file I/O actually lands on disk).
 
+## Summary
+
+A pure-Ruby x86 PE32 (32-bit Windows) emulator. Not a production tool
+for running games — for that use Wine. This is a hackable, educational
+implementation of the loader/CPU/Win32 surface you can step through,
+extend, and read in a few sittings.
+
+What's in the box:
+
+| Layer | Status | Notes |
+| --- | --- | --- |
+| PE32 loader (headers, sections, imports, RT_STRING, RT_RCDATA) | ✅ | `lib/exe32_rb/pe/` |
+| x86 decoder (REX, ModR/M, SIB, common ops) | ✅ | Mode-aware (32/64); 32-bit fully exercised |
+| Executor (arith, logic, shifts, branches, string ops, x87 FPU, SSE/SSE2) | ✅ | `lib/exe32_rb/emulator/` |
+| Virtual memory (sparse paged, lazy alloc) | ✅ | 256 MiB scratch costs nothing until touched |
+| SEH dispatch (FS:[0] chain walk, RtlUnwind) | ✅ | Memory faults synthesize EXCEPTION_ACCESS_VIOLATION |
+| Win32 API dispatcher (`__stdcall`, `__cdecl`, Delphi `register`) | ✅ | `lib/exe32_rb/api/dispatcher.rb` |
+| ~100 Win32 stubs (signatures table for correct stack semantics) | ✅ | `lib/exe32_rb/api/signatures.rb` |
+| Real host-backed file I/O | ✅ | CreateFileW → Ruby `File`, sandboxed under `/tmp` |
+| Delphi `TMemoryManagerEx` replacement | ✅ | `--delphi-memmgr=ADDR` |
+| Synthetic `C:\` filesystem | ✅ | `--winfs` |
+| Minimal COM (CoCreateInstance + vtables) | ✅ | `--com` |
+| DLL loader (parse PE, resolve exports for GetProcAddress) | ✅ | `--load-dlls` |
+| DirectDraw → framebuffer bridge | ⚠ partial | Framebuffer exists; no on-screen window wired up |
+| Interactive debugger REPL | ✅ | `exe32_rb debug` |
+| Ruby2D live visualizer (regs/disasm/stack/log) | ✅ | `exe32_rb visualize` |
+| Instruction breakpoints + memory watchpoints | ✅ | `--break`, `--watch` |
+| Hello-world / factorial / hello-file sample fixtures | ✅ | `lib/exe32_rb/samples/` |
+
+What's *not* here (and won't realistically arrive in a single session):
+real DirectInput/DirectSound, real registry, real GUI message pump,
+JIT, multithreading, full SEH unwind semantics.
+
+## Benchmarks
+
+Measured on an Apple Silicon Mac (M-series), Ruby 3.3.0, single core:
+
+| Workload | Wall time | What it covers |
+| --- | --- | --- |
+| `run examples/hello.exe` | **~150 ms** | Full pipeline: load + map + 11 instructions + WriteFile to stdout |
+| `run examples/factorial.exe` | **~150 ms** | Recursive call/ret, IMUL, conditional jumps; computes 5!=120 |
+| `run examples/hello_file.exe` | **~150 ms** | CreateFileW + WriteFile + CloseHandle round-trip to host disk |
+| Full test suite (`rake test`) | **~200 ms** | 37 runs / 97 assertions covering decoder, executor, SEH, FPU, SSE, COM, DLL loader, WinFS |
+| Sustained throughput on real binary | **~100,000 instructions/sec** | Measured running a real Delphi InnoSetup installer; pure interpreted Ruby |
+
+For context: a native x86 CPU executes ~1–3 *billion* instructions per
+second. We're ~10,000× slower per instruction, which means the
+emulator is well-suited to short binaries (< a few million
+instructions of work) and learning, and not suited to multi-MB
+compressed payload validation or 60 fps game loops.
+
+### Code size
+
+```
+   8121 total      # all lib/**/*.rb + test/*.rb
+     31 files      # lib/**/*.rb
+      3 files      # test/*_test.rb
+```
+
+Pure Ruby. Runtime dependencies: just the standard library
+(`optparse`, `set`, `fileutils`, `tmpdir`, `readline`). Optional
+`ruby2d` gem for the live visualizer.
+
 ## Quick start
 
 ```sh
