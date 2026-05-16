@@ -144,6 +144,60 @@ class InstructionsTest < Minitest::Test
     assert_equal 0x60_0010, op32.disp
   end
 
+  # ------------------------------------------------------------------
+  # x87 FPU
+  # ------------------------------------------------------------------
+
+  def test_fpu_fld_fadd_fstp_round_trip
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+
+    @memory.write(0x60_0000, [1.5].pack("e"))
+    @memory.write(0x60_0008, [2.5].pack("e"))
+    cpu.registers.write32(0, 0x60_0000)
+    cpu.registers.write32(3, 0x60_0008)
+    cpu.registers.write32(1, 0x60_0020)
+
+    # fld dword [eax] ; fadd dword [ebx] ; fstp dword [ecx]
+    @memory.write(CODE_BASE, [0xD9, 0x00, 0xD8, 0x03, 0xD9, 0x19].pack("C*"))
+    3.times { run_one(decoder, executor) }
+
+    result = @memory.read(0x60_0020, 4).unpack1("e")
+    assert_in_delta 4.0, result, 1e-6
+  end
+
+  def test_fpu_fchs
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    cpu.fpu.push(3.5)
+
+    @memory.write(CODE_BASE, [0xD9, 0xE0].pack("C*"))
+    run_one(decoder, executor)
+    assert_in_delta(-3.5, cpu.fpu.st(0), 1e-6)
+  end
+
+  def test_fpu_load_pi_zero_one
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+
+    @memory.write(CODE_BASE, [0xD9, 0xE8, 0xD9, 0xEE, 0xD9, 0xEB].pack("C*"))
+    3.times { run_one(decoder, executor) }
+    assert_in_delta(Math::PI, cpu.fpu.st(0), 1e-12)
+    assert_in_delta(0.0,      cpu.fpu.st(1), 1e-12)
+    assert_in_delta(1.0,      cpu.fpu.st(2), 1e-12)
+  end
+
+  def test_fpu_faddp
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    cpu.fpu.push(2.0); cpu.fpu.push(5.0)
+
+    # DE C1 = faddp st(1), st
+    @memory.write(CODE_BASE, [0xDE, 0xC1].pack("C*"))
+    run_one(decoder, executor)
+    assert_in_delta 7.0, cpu.fpu.st(0), 1e-12
+  end
+
   private
 
   def make(mode)

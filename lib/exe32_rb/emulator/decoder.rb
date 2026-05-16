@@ -176,7 +176,7 @@ module Exe32Rb
           when 0xD1       then group2(operand_size_v, imm_kind: :one)
           when 0xD2       then group2(8, imm_kind: :cl)
           when 0xD3       then group2(operand_size_v, imm_kind: :cl)
-          when 0xD8..0xDF then fpu_no_op
+          when 0xD8..0xDF then fpu_instr(opcode)
           when 0xE8       then call_rel32
           when 0xE9       then jmp_rel32
           when 0xEB       then jmp_rel8
@@ -430,19 +430,112 @@ module Exe32Rb
           @mode == 64 ? 64 : 32
         end
 
-        # x87 FPU instructions (opcodes 0xD8..0xDF). We don't execute floating
-        # point — but we do need to consume the right byte count so the next
-        # instruction decodes correctly. The encoding is opcode + ModR/M, plus
-        # SIB/displacement when the ModR/M points at memory.
-        def fpu_no_op
+        # x87 FPU instructions (opcodes 0xD8..0xDF). Each opcode has a
+        # ModR/M byte; if mod != 3 the operand is memory (with usual
+        # SIB/disp encoding) and the reg field selects the sub-op.
+        # If mod == 3 the full ModR/M byte (rest of E0..FF range) is
+        # itself the sub-op selector.
+        def fpu_instr(opcode)
           byte = peek_u8
           mod = (byte >> 6) & 0x3
           if mod == 3
-            consume_byte # register-register form: just ModR/M
+            full = byte
+            consume_byte
+            decode_fpu_reg_op(opcode, full)
           else
-            decode_modrm_with_field(32) # walks SIB/disp correctly
+            field = (byte >> 3) & 0x7
+            _, _reg, rm_op = decode_modrm_with_field(fpu_mem_size(opcode))
+            decode_fpu_mem_op(opcode, field, rm_op)
           end
-          instr(:fpu_nop, [])
+        end
+
+        # mod != 3 case — the memory operand size depends on the opcode:
+        #   D8 / DA: m32 (single / int32)
+        #   D9       m32 (FLD/FST/FSTP) / m16 (FLDCW/FNSTCW) / m14 (FLDENV)
+        #   DB       m32 (int) / m80 (FLD/FSTP TBYTE)
+        #   DC / DF  m64 (double / int64) / DF int16
+        # We default to 32 since the executor reads the right number of
+        # bytes itself via the mnemonic; only the disp/SIB byte count matters
+        # for decoding, and it's identical for m16/m32/m64/m80.
+        def fpu_mem_size(_opcode); 32; end
+
+        FPU_MEM_DISPATCH = {
+          0xD8 => %i[fadd_m32 fmul_m32 fcom_m32 fcomp_m32 fsub_m32 fsubr_m32 fdiv_m32 fdivr_m32],
+          0xD9 => %i[fld_m32 fpu_nop fst_m32 fstp_m32 fldenv fldcw_m16 fnstenv fnstcw_m16],
+          0xDA => %i[fiadd_m32 fimul_m32 ficom_m32 ficomp_m32 fisub_m32 fisubr_m32 fidiv_m32 fidivr_m32],
+          0xDB => %i[fild_m32 fpu_nop fist_m32 fistp_m32 fpu_nop fld_m80 fpu_nop fstp_m80],
+          0xDC => %i[fadd_m64 fmul_m64 fcom_m64 fcomp_m64 fsub_m64 fsubr_m64 fdiv_m64 fdivr_m64],
+          0xDD => %i[fld_m64 fisttp_m64 fst_m64 fstp_m64 frstor fpu_nop fnsave fnstsw_m16],
+          0xDE => %i[fiadd_m16 fimul_m16 ficom_m16 ficomp_m16 fisub_m16 fisubr_m16 fidiv_m16 fidivr_m16],
+          0xDF => %i[fild_m16 fisttp_m16 fist_m16 fistp_m16 fbld fild_m64 fbstp fistp_m64],
+        }.freeze
+
+        def decode_fpu_mem_op(opcode, field, mem)
+          mnem = FPU_MEM_DISPATCH[opcode][field] || :fpu_nop
+          instr(mnem, [mem])
+        end
+
+        def decode_fpu_reg_op(opcode, full)
+          sti = full & 0x7
+          # mod==3 form: full ModR/M byte uniquely identifies the operation.
+          case opcode
+          when 0xD8
+            case full & 0xF8
+            when 0xC0 then instr(:fadd_st,  [build_reg(80, 0), build_reg(80, sti)])
+            when 0xC8 then instr(:fmul_st,  [build_reg(80, 0), build_reg(80, sti)])
+            when 0xD0 then instr(:fcom_st,  [build_reg(80, sti)])
+            when 0xD8 then instr(:fcomp_st, [build_reg(80, sti)])
+            when 0xE0 then instr(:fsub_st,  [build_reg(80, 0), build_reg(80, sti)])
+            when 0xE8 then instr(:fsubr_st, [build_reg(80, 0), build_reg(80, sti)])
+            when 0xF0 then instr(:fdiv_st,  [build_reg(80, 0), build_reg(80, sti)])
+            when 0xF8 then instr(:fdivr_st, [build_reg(80, 0), build_reg(80, sti)])
+            else instr(:fpu_nop, [])
+            end
+          when 0xD9
+            case full
+            when 0xC0..0xC7 then instr(:fld_st, [build_reg(80, sti)])
+            when 0xC8..0xCF then instr(:fxch,   [build_reg(80, sti)])
+            when 0xD0       then instr(:fpu_nop, [])
+            when 0xE0       then instr(:fchs, [])
+            when 0xE1       then instr(:fabs, [])
+            when 0xE4       then instr(:ftst, [])
+            when 0xE8       then instr(:fld1, [])
+            when 0xE9       then instr(:fldl2t, [])
+            when 0xEA       then instr(:fldl2e, [])
+            when 0xEB       then instr(:fldpi, [])
+            when 0xEC       then instr(:fldlg2, [])
+            when 0xED       then instr(:fldln2, [])
+            when 0xEE       then instr(:fldz, [])
+            else instr(:fpu_nop, [])
+            end
+          when 0xDD
+            case full & 0xF8
+            when 0xC0 then instr(:ffree, [build_reg(80, sti)])
+            when 0xD0 then instr(:fst_st, [build_reg(80, sti)])
+            when 0xD8 then instr(:fstp_st, [build_reg(80, sti)])
+            when 0xE0 then instr(:fucom, [build_reg(80, sti)])
+            when 0xE8 then instr(:fucomp, [build_reg(80, sti)])
+            else instr(:fpu_nop, [])
+            end
+          when 0xDE
+            case full
+            when 0xC0..0xC7 then instr(:faddp,  [build_reg(80, sti)])
+            when 0xC8..0xCF then instr(:fmulp,  [build_reg(80, sti)])
+            when 0xD9       then instr(:fcompp, [])
+            when 0xE0..0xE7 then instr(:fsubrp, [build_reg(80, sti)])
+            when 0xE8..0xEF then instr(:fsubp,  [build_reg(80, sti)])
+            when 0xF0..0xF7 then instr(:fdivrp, [build_reg(80, sti)])
+            when 0xF8..0xFF then instr(:fdivp,  [build_reg(80, sti)])
+            else instr(:fpu_nop, [])
+            end
+          when 0xDF
+            case full
+            when 0xE0 then instr(:fnstsw_ax, [])
+            else instr(:fpu_nop, [])
+            end
+          else
+            instr(:fpu_nop, [])
+          end
         end
 
         def push_imm8

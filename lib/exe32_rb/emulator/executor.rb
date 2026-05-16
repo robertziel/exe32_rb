@@ -302,7 +302,108 @@ module Exe32Rb
       # ----------------------------------------------------------------
 
       def op_nop(_); end
-      def op_fpu_nop(_); end # x87 instructions silently skipped (no FPU model)
+      def op_fpu_nop(_); end # FPU instructions we don't implement — silently skip
+
+      # ----------------------------------------------------------------
+      # x87 FPU — minimum useful subset
+      # ----------------------------------------------------------------
+
+      def fpu; @cpu.fpu; end
+
+      # IEEE 754 single (32-bit) <-> Ruby Float
+      def read_f32(addr); @memory.read(addr, 4).unpack1("e"); end
+      def read_f64(addr); @memory.read(addr, 8).unpack1("E"); end
+      def write_f32(addr, v); @memory.write(addr, [v].pack("e")); end
+      def write_f64(addr, v); @memory.write(addr, [v].pack("E")); end
+
+      # Memory loads (push onto FPU stack)
+      def op_fld_m32(instr);  fpu.push(read_f32(effective_address(instr.operands[0]))); end
+      def op_fld_m64(instr);  fpu.push(read_f64(effective_address(instr.operands[0]))); end
+      def op_fild_m32(instr); fpu.push(signed_of(@memory.read_u32(effective_address(instr.operands[0])), 32).to_f); end
+      def op_fild_m64(instr); fpu.push(signed_of(@memory.read_u64(effective_address(instr.operands[0])), 64).to_f); end
+      def op_fild_m16(instr); fpu.push(signed_of(@memory.read_u16(effective_address(instr.operands[0])), 16).to_f); end
+
+      # Memory stores
+      def op_fst_m32(instr);  write_f32(effective_address(instr.operands[0]), fpu.st(0)); end
+      def op_fst_m64(instr);  write_f64(effective_address(instr.operands[0]), fpu.st(0)); end
+      def op_fstp_m32(instr); write_f32(effective_address(instr.operands[0]), fpu.st(0)); fpu.pop; end
+      def op_fstp_m64(instr); write_f64(effective_address(instr.operands[0]), fpu.st(0)); fpu.pop; end
+
+      # Integer stores
+      def op_fist_m32(instr);  @memory.write_u32(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF); end
+      def op_fistp_m32(instr); @memory.write_u32(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF); fpu.pop; end
+      def op_fist_m16(instr);  @memory.write_u16(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF); end
+      def op_fistp_m16(instr); @memory.write_u16(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF); fpu.pop; end
+      def op_fistp_m64(instr); @memory.write_u64(effective_address(instr.operands[0]), fpu.st(0).to_i & 0xFFFF_FFFF_FFFF_FFFF); fpu.pop; end
+
+      # Arithmetic with memory (m32 / m64)
+      def op_fadd_m32(instr); fpu.set_st(0, fpu.st(0) + read_f32(effective_address(instr.operands[0]))); end
+      def op_fadd_m64(instr); fpu.set_st(0, fpu.st(0) + read_f64(effective_address(instr.operands[0]))); end
+      def op_fsub_m32(instr); fpu.set_st(0, fpu.st(0) - read_f32(effective_address(instr.operands[0]))); end
+      def op_fsub_m64(instr); fpu.set_st(0, fpu.st(0) - read_f64(effective_address(instr.operands[0]))); end
+      def op_fsubr_m32(instr); fpu.set_st(0, read_f32(effective_address(instr.operands[0])) - fpu.st(0)); end
+      def op_fsubr_m64(instr); fpu.set_st(0, read_f64(effective_address(instr.operands[0])) - fpu.st(0)); end
+      def op_fmul_m32(instr); fpu.set_st(0, fpu.st(0) * read_f32(effective_address(instr.operands[0]))); end
+      def op_fmul_m64(instr); fpu.set_st(0, fpu.st(0) * read_f64(effective_address(instr.operands[0]))); end
+      def op_fdiv_m32(instr); fpu.set_st(0, fpu.st(0) / read_f32(effective_address(instr.operands[0]))); end
+      def op_fdiv_m64(instr); fpu.set_st(0, fpu.st(0) / read_f64(effective_address(instr.operands[0]))); end
+      def op_fdivr_m32(instr); fpu.set_st(0, read_f32(effective_address(instr.operands[0])) / fpu.st(0)); end
+      def op_fdivr_m64(instr); fpu.set_st(0, read_f64(effective_address(instr.operands[0])) / fpu.st(0)); end
+
+      # FCOM m32/m64 — compare ST(0) with memory operand
+      def op_fcom_m32(instr); fpu.set_compare_flags(fpu.st(0), read_f32(effective_address(instr.operands[0]))); end
+      def op_fcom_m64(instr); fpu.set_compare_flags(fpu.st(0), read_f64(effective_address(instr.operands[0]))); end
+      def op_fcomp_m32(instr); op_fcom_m32(instr); fpu.pop; end
+      def op_fcomp_m64(instr); op_fcom_m64(instr); fpu.pop; end
+
+      # Register form: arithmetic on ST(0) and ST(i)
+      def op_fadd_st(instr);  fpu.set_st(0, fpu.st(0) + fpu.st(sti(instr.operands[1]))); end
+      def op_fmul_st(instr);  fpu.set_st(0, fpu.st(0) * fpu.st(sti(instr.operands[1]))); end
+      def op_fsub_st(instr);  fpu.set_st(0, fpu.st(0) - fpu.st(sti(instr.operands[1]))); end
+      def op_fsubr_st(instr); fpu.set_st(0, fpu.st(sti(instr.operands[1])) - fpu.st(0)); end
+      def op_fdiv_st(instr);  fpu.set_st(0, fpu.st(0) / fpu.st(sti(instr.operands[1]))); end
+      def op_fdivr_st(instr); fpu.set_st(0, fpu.st(sti(instr.operands[1])) / fpu.st(0)); end
+      def op_fcom_st(instr);  fpu.set_compare_flags(fpu.st(0), fpu.st(sti(instr.operands[0]))); end
+      def op_fcomp_st(instr); op_fcom_st(instr); fpu.pop; end
+
+      # FLD ST(i) — duplicate
+      def op_fld_st(instr); fpu.push(fpu.st(sti(instr.operands[0]))); end
+      def op_fxch(instr); i = sti(instr.operands[0]); a = fpu.st(0); fpu.set_st(0, fpu.st(i)); fpu.set_st(i, a); end
+      def op_ffree(_instr); end # tag-only operation
+      def op_fst_st(instr); fpu.set_st(sti(instr.operands[0]), fpu.st(0)); end
+      def op_fstp_st(instr); fpu.set_st(sti(instr.operands[0]), fpu.st(0)); fpu.pop; end
+      def op_fucom(instr); op_fcom_st(instr); end
+      def op_fucomp(instr); op_fcomp_st(instr); end
+
+      # Pop-style arithmetic: do op, then pop
+      def op_faddp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(i) + fpu.st(0)); fpu.pop; end
+      def op_fmulp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(i) * fpu.st(0)); fpu.pop; end
+      def op_fsubp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(i) - fpu.st(0)); fpu.pop; end
+      def op_fsubrp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(0) - fpu.st(i)); fpu.pop; end
+      def op_fdivp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(i) / fpu.st(0)); fpu.pop; end
+      def op_fdivrp(instr); i = sti(instr.operands[0]); fpu.set_st(i, fpu.st(0) / fpu.st(i)); fpu.pop; end
+      def op_fcompp(_instr); fpu.set_compare_flags(fpu.st(0), fpu.st(1)); fpu.pop; fpu.pop; end
+
+      # Misc
+      def op_fchs(_instr); fpu.set_st(0, -fpu.st(0)); end
+      def op_fabs(_instr); fpu.set_st(0, fpu.st(0).abs); end
+      def op_ftst(_instr); fpu.set_compare_flags(fpu.st(0), 0.0); end
+      def op_fld1(_instr); fpu.push(1.0); end
+      def op_fldz(_instr); fpu.push(0.0); end
+      def op_fldpi(_instr); fpu.push(Math::PI); end
+      def op_fldl2t(_instr); fpu.push(Math.log2(10)); end
+      def op_fldl2e(_instr); fpu.push(Math.log2(Math::E)); end
+      def op_fldlg2(_instr); fpu.push(Math.log10(2)); end
+      def op_fldln2(_instr); fpu.push(Math.log(2)); end
+
+      # Status word reads — FNSTSW AX puts status in AX
+      def op_fnstsw_ax(_instr); @cpu.registers.write16(Registers::RAX, fpu.status_word); end
+      def op_fnstsw_m16(instr); @memory.write_u16(effective_address(instr.operands[0]), fpu.status_word); end
+      def op_fnstcw_m16(instr); @memory.write_u16(effective_address(instr.operands[0]), fpu.control); end
+      def op_fldcw_m16(instr); fpu.control = @memory.read_u16(effective_address(instr.operands[0])); end
+
+      # Convert an ST(i) operand (a Reg with size=80, idx=i) to its index
+      def sti(operand); operand.idx; end
 
       # AH <-> flags transfers (used by Borland/Delphi floating-point compare
       # paths via FCOM + FSTSW + SAHF).
