@@ -405,6 +405,95 @@ module Exe32Rb
       # Convert an ST(i) operand (a Reg with size=80, idx=i) to its index
       def sti(operand); operand.idx; end
 
+      # ----------------------------------------------------------------
+      # SSE / SSE2 — 128-bit XMM operations
+      # ----------------------------------------------------------------
+
+      def read_xmm_operand(op)
+        case op
+        when Operand::Reg
+          @cpu.xmm.read(op.idx)
+        when Operand::Mem
+          @memory.read(effective_address(op), 16)
+        end
+      end
+
+      def write_xmm_operand(op, bytes)
+        case op
+        when Operand::Reg
+          @cpu.xmm.write(op.idx, bytes)
+        when Operand::Mem
+          @memory.write(effective_address(op), bytes)
+        end
+      end
+
+      def op_movups(instr) write_xmm_operand(instr.operands[0], read_xmm_operand(instr.operands[1])); end
+      def op_movaps(instr) write_xmm_operand(instr.operands[0], read_xmm_operand(instr.operands[1])); end
+      def op_movdqa(instr) write_xmm_operand(instr.operands[0], read_xmm_operand(instr.operands[1])); end
+      def op_movdqu(instr) write_xmm_operand(instr.operands[0], read_xmm_operand(instr.operands[1])); end
+
+      def op_movd(instr)
+        dst, src = instr.operands
+        if dst.size == 128 # MOVD xmm, r/m32 — zero-extend to 128
+          value = read_op(src, 32) & 0xFFFF_FFFF
+          @cpu.xmm.write(dst.idx, [value, 0, 0, 0].pack("V V V V"))
+        else               # MOVD r/m32, xmm — take low 32 of xmm
+          bytes = read_xmm_operand(src)
+          write_op(dst, bytes.unpack1("V"))
+        end
+      end
+
+      def op_movq(instr)
+        dst, src = instr.operands
+        if dst.is_a?(Operand::Reg) && dst.size == 128
+          # MOVQ xmm, xmm/m64 — low 64 bits set, high zeroed
+          src_bytes = src.is_a?(Operand::Reg) ? read_xmm_operand(src) : @memory.read(effective_address(src), 8) + "\x00".b * 8
+          low = src_bytes.byteslice(0, 8)
+          @cpu.xmm.write(dst.idx, low + ("\x00".b * 8))
+        else
+          # MOVQ m64, xmm — store low 64 of xmm
+          bytes = read_xmm_operand(src)
+          @memory.write(effective_address(dst), bytes.byteslice(0, 8))
+        end
+      end
+
+      def op_pxor(instr); xmm_bitwise(instr) { |a, b| a ^ b }; end
+      def op_pand(instr); xmm_bitwise(instr) { |a, b| a & b }; end
+      def op_pandn(instr); xmm_bitwise(instr) { |a, b| (~a) & b }; end
+      def op_por(instr);  xmm_bitwise(instr) { |a, b| a | b }; end
+      def op_xorps(instr); xmm_bitwise(instr) { |a, b| a ^ b }; end
+      def op_andps(instr); xmm_bitwise(instr) { |a, b| a & b }; end
+      def op_andnps(instr); xmm_bitwise(instr) { |a, b| (~a) & b }; end
+      def op_orps(instr);  xmm_bitwise(instr) { |a, b| a | b }; end
+
+      def op_paddb(instr); xmm_lanes(instr, 1) { |a, b| (a + b) & 0xFF }; end
+      def op_paddw(instr); xmm_lanes(instr, 2) { |a, b| (a + b) & 0xFFFF }; end
+      def op_paddd(instr); xmm_lanes(instr, 4) { |a, b| (a + b) & 0xFFFF_FFFF }; end
+      def op_psubb(instr); xmm_lanes(instr, 1) { |a, b| (a - b) & 0xFF }; end
+      def op_psubw(instr); xmm_lanes(instr, 2) { |a, b| (a - b) & 0xFFFF }; end
+      def op_psubd(instr); xmm_lanes(instr, 4) { |a, b| (a - b) & 0xFFFF_FFFF }; end
+      def op_pcmpeqb(instr); xmm_lanes(instr, 1) { |a, b| a == b ? 0xFF : 0 }; end
+      def op_pcmpeqw(instr); xmm_lanes(instr, 2) { |a, b| a == b ? 0xFFFF : 0 }; end
+      def op_pcmpeqd(instr); xmm_lanes(instr, 4) { |a, b| a == b ? 0xFFFF_FFFF : 0 }; end
+
+      def xmm_bitwise(instr)
+        dst, src = instr.operands
+        a = read_xmm_operand(dst).unpack("Q< Q<")
+        b = read_xmm_operand(src).unpack("Q< Q<")
+        result = [yield(a[0], b[0]) & 0xFFFF_FFFF_FFFF_FFFF,
+                  yield(a[1], b[1]) & 0xFFFF_FFFF_FFFF_FFFF].pack("Q< Q<")
+        write_xmm_operand(dst, result)
+      end
+
+      def xmm_lanes(instr, lane_bytes)
+        dst, src = instr.operands
+        fmt = {1 => "C16", 2 => "v8", 4 => "V4"}[lane_bytes]
+        a = read_xmm_operand(dst).unpack(fmt)
+        b = read_xmm_operand(src).unpack(fmt)
+        result = a.zip(b).map { |x, y| yield(x, y) }.pack(fmt)
+        write_xmm_operand(dst, result)
+      end
+
       # AH <-> flags transfers (used by Borland/Delphi floating-point compare
       # paths via FCOM + FSTSW + SAHF).
       def op_sahf(_)

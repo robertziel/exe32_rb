@@ -6,7 +6,7 @@ module Exe32Rb
     # is the container the loop operates on. Keeping state here means the
     # Decoder and Executor stay easy to test in isolation.
     class CPU
-      attr_reader :registers, :flags, :mode, :fpu
+      attr_reader :registers, :flags, :mode, :fpu, :xmm
 
       attr_accessor :fs_base, :gs_base
 
@@ -17,6 +17,7 @@ module Exe32Rb
         @fs_base   = 0
         @gs_base   = 0
         @fpu       = FPU.new
+        @xmm       = XMM.new(count: mode == 64 ? 16 : 8)
       end
 
       def address_mask

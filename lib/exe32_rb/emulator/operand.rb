@@ -12,10 +12,12 @@ module Exe32Rb
       Reg = Struct.new(:size, :idx, :high_byte, keyword_init: true) do
         def to_s
           case size
-          when 8  then high_byte ? Registers::NAMES_8H[idx + 4] : Registers::NAMES_8L[idx]
-          when 16 then Registers::NAMES_16[idx]
-          when 32 then Registers::NAMES_32[idx]
-          when 64 then Registers::NAMES_64[idx]
+          when 8   then high_byte ? Registers::NAMES_8H[idx + 4] : Registers::NAMES_8L[idx]
+          when 16  then Registers::NAMES_16[idx]
+          when 32  then Registers::NAMES_32[idx]
+          when 64  then Registers::NAMES_64[idx]
+          when 80  then "st(#{idx})"
+          when 128 then "xmm#{idx}"
           end
         end
       end

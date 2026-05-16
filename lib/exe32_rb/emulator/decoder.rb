@@ -206,8 +206,98 @@ module Exe32Rb
           when 0xBE            then movsx(src: 8)
           when 0xBF            then movsx(src: 16)
           when 0xAF            then imul_two_op
+          # SSE/SSE2 — operand selection depends on prefix:
+          #   no prefix → packed-single / scalar-single
+          #   0x66      → packed-double / 128-bit integer SIMD
+          #   0xF3      → scalar-single REP variant / movdqu
+          #   0xF2      → scalar-double REP variant
+          when 0x10, 0x11      then sse_movups(opcode2)
+          when 0x28, 0x29      then sse_movaps(opcode2)
+          when 0x6E            then sse_movd(opcode2)
+          when 0x6F, 0x7F      then sse_movdq(opcode2)
+          when 0x7E            then sse_movd_or_movq(opcode2)
+          when 0x57            then sse_packed(:xorps)
+          when 0x54            then sse_packed(:andps)
+          when 0x55            then sse_packed(:andnps)
+          when 0x56            then sse_packed(:orps)
+          when 0xEF            then sse_packed(:pxor)
+          when 0xDB            then sse_packed(:pand)
+          when 0xDF            then sse_packed(:pandn)
+          when 0xEB            then sse_packed(:por)
+          when 0xFE            then sse_packed(:paddd)
+          when 0xFC            then sse_packed(:paddb)
+          when 0xFD            then sse_packed(:paddw)
+          when 0xFA            then sse_packed(:psubd)
+          when 0xF8            then sse_packed(:psubb)
+          when 0xF9            then sse_packed(:psubw)
+          when 0x74            then sse_packed(:pcmpeqb)
+          when 0x75            then sse_packed(:pcmpeqw)
+          when 0x76            then sse_packed(:pcmpeqd)
           else
             raise Exe32Rb::DecodeError, format("unsupported 0F %02X at 0x%X", opcode2, @address)
+          end
+        end
+
+        # Generic packed-128 SSE2 instruction: xmm, xmm/m128
+        # We require the 0x66 prefix here (integer SIMD variant).
+        # Non-prefixed forms typically apply to packed floats; we treat
+        # both the same since most Ruby implementations mirror the
+        # bitwise/integer operation regardless.
+        def sse_packed(mnem)
+          reg_op, rm_op = decode_modrm(128)
+          instr(mnem, [reg_op, rm_op])
+        end
+
+        def sse_movups(opcode2)
+          reg_op, rm_op = decode_modrm(128)
+          if opcode2 == 0x10
+            instr(:movups, [reg_op, rm_op])
+          else
+            instr(:movups, [rm_op, reg_op])
+          end
+        end
+
+        def sse_movaps(opcode2)
+          reg_op, rm_op = decode_modrm(128)
+          if opcode2 == 0x28
+            instr(:movaps, [reg_op, rm_op])
+          else
+            instr(:movaps, [rm_op, reg_op])
+          end
+        end
+
+        # 66 0F 6E /r = MOVD xmm, r/m32 — dst is xmm (128), src is r/m32
+        def sse_movd(_opcode2)
+          field = (peek_u8 >> 3) & 0x7
+          reg_idx = field
+          _, rm_op = decode_modrm(32)
+          dst = Operand::Reg.new(size: 128, idx: reg_idx, high_byte: false)
+          instr(:movd, [dst, rm_op])
+        end
+
+        # 66 0F 7E /r = MOVD r/m32, xmm  (move xmm->r/m32)
+        # F3 0F 7E /r = MOVQ xmm, xmm/m64
+        def sse_movd_or_movq(_opcode2)
+          if @rep_prefix == :rep # F3 prefix → MOVQ
+            reg_op, rm_op = decode_modrm(128)
+            instr(:movq, [reg_op, rm_op])
+          else                    # 66 or none → MOVD
+            field = (peek_u8 >> 3) & 0x7
+            reg_idx = field
+            _, rm_op = decode_modrm(32)
+            src = Operand::Reg.new(size: 128, idx: reg_idx, high_byte: false)
+            instr(:movd, [rm_op, src])
+          end
+        end
+
+        # 66 0F 6F /r = MOVDQA  ; F3 0F 6F /r = MOVDQU  ; 7F = reverse direction
+        def sse_movdq(opcode2)
+          reg_op, rm_op = decode_modrm(128)
+          mnem = (@rep_prefix == :rep) ? :movdqu : :movdqa
+          if opcode2 == 0x6F
+            instr(mnem, [reg_op, rm_op])
+          else
+            instr(mnem, [rm_op, reg_op])
           end
         end
 

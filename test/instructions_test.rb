@@ -198,6 +198,61 @@ class InstructionsTest < Minitest::Test
     assert_in_delta 7.0, cpu.fpu.st(0), 1e-12
   end
 
+  # ------------------------------------------------------------------
+  # SSE / SSE2 — 128-bit XMM
+  # ------------------------------------------------------------------
+
+  def test_sse_pxor_clears_xmm
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    cpu.xmm.write(0, "\xAA".b * 16)
+
+    # 66 0F EF C0 = pxor xmm0, xmm0
+    @memory.write(CODE_BASE, [0x66, 0x0F, 0xEF, 0xC0].pack("C*"))
+    run_one(decoder, executor)
+    assert_equal "\x00".b * 16, cpu.xmm.read(0)
+  end
+
+  def test_sse_movdqa_round_trip_memory
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    # Write a 16-byte pattern to memory
+    pattern = (1..16).map(&:chr).join.b
+    @memory.write(0x60_0000, pattern)
+    cpu.registers.write32(0, 0x60_0000) # eax
+
+    # 66 0F 6F 00  = movdqa xmm0, [eax]
+    @memory.write(CODE_BASE, [0x66, 0x0F, 0x6F, 0x00].pack("C*"))
+    run_one(decoder, executor)
+    assert_equal pattern, cpu.xmm.read(0)
+  end
+
+  def test_sse_paddd_lanewise_addition
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    cpu.xmm.write(0, [1, 2, 3, 4].pack("V V V V"))
+    cpu.xmm.write(1, [10, 20, 30, 40].pack("V V V V"))
+
+    # 66 0F FE C1 = paddd xmm0, xmm1
+    @memory.write(CODE_BASE, [0x66, 0x0F, 0xFE, 0xC1].pack("C*"))
+    run_one(decoder, executor)
+    assert_equal [11, 22, 33, 44], cpu.xmm.read(0).unpack("V V V V")
+  end
+
+  def test_sse_pcmpeqb
+    decoder, executor = make(32)
+    cpu = executor.instance_variable_get(:@cpu)
+    cpu.xmm.write(0, "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10".b)
+    cpu.xmm.write(1, "\x01\xFF\x03\xFF\x05\xFF\x07\xFF\x09\xFF\x0B\xFF\x0D\xFF\x0F\xFF".b)
+
+    # 66 0F 74 C1 = pcmpeqb xmm0, xmm1
+    @memory.write(CODE_BASE, [0x66, 0x0F, 0x74, 0xC1].pack("C*"))
+    run_one(decoder, executor)
+    # bytes that matched become 0xFF, others 0x00
+    assert_equal "\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00".b,
+                 cpu.xmm.read(0)
+  end
+
   private
 
   def make(mode)
