@@ -465,16 +465,26 @@ module Exe32Rb
         dispatcher.install_handler("kernel32.dll", "GetCurrentProcessId", args: 0) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "GetCurrentThreadId", args: 0) { |_, _| 1 }
         dispatcher.install_handler("kernel32.dll", "IsProcessorFeaturePresent", args: 1) { |_, _| 0 }
+        # Counters that actually advance. InnoSetup and other installers use
+        # these as entropy for unique temp file names; returning a fixed
+        # value produces identical names every call, defeating uniqueness
+        # tests and breaking path-build logic.
+        perf_counter = 0
         dispatcher.install_handler("kernel32.dll", "QueryPerformanceCounter", args: 1) do |machine, args|
-          machine.memory.write_u64(args[0], 0) if args[0] != 0
+          perf_counter += 1
+          machine.memory.write_u64(args[0], perf_counter) if args[0] != 0
           1
         end
         dispatcher.install_handler("kernel32.dll", "QueryPerformanceFrequency", args: 1) do |machine, args|
           machine.memory.write_u64(args[0], 1_000_000) if args[0] != 0
           1
         end
+        # Return a non-zero Windows FILETIME so date-formatting code doesn't
+        # produce weird zero results.
         dispatcher.install_handler("kernel32.dll", "GetSystemTimeAsFileTime", args: 1) do |machine, args|
-          machine.memory.write_u64(args[0], 0) if args[0] != 0
+          # FILETIME for 2024-01-01 (in 100-ns intervals since 1601).
+          ft = 0x01DA_3FE0_DDA0_F000
+          machine.memory.write_u64(args[0], ft) if args[0] != 0
           0
         end
 
