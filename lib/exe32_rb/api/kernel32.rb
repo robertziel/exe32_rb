@@ -263,11 +263,98 @@ module Exe32Rb
           0
         end
 
-        dispatcher.install_handler("kernel32.dll", "RaiseException", args: 4) do |_machine, args|
-          code = args[0] & 0xFFFF_FFFF
-          warn format("[RaiseException] code=0x%08X flags=0x%X (no SEH support; halting)",
-                      code, args[1] & 0xFFFF_FFFF)
-          raise Emulator::Executor::HaltSignal.new(code)
+        # RaiseException dispatches through the FS:[0] SEH chain. We
+        # synthesize an EXCEPTION_RECORD and a near-minimal CONTEXT on
+        # scratch, then jump to the first handler. The handler returns via
+        # an established convention (often through RtlUnwind), so we let
+        # the guest's own RTL drive the catch/finally logic.
+        dispatcher.install_handler("kernel32.dll", "RaiseException", args: 4) do |machine, args|
+          code  = args[0] & 0xFFFF_FFFF
+          flags = args[1] & 0xFFFF_FFFF
+          nargs = args[2] & 0xFFFF_FFFF
+          argp  = args[3] & 0xFFFF_FFFF
+
+          # Read the head of the SEH chain from the TIB (FS:[0]).
+          frame = machine.memory.read_u32(machine.cpu.fs_base + 0)
+          if frame == 0xFFFF_FFFF || frame == 0
+            warn format("[RaiseException] code=0x%08X — empty SEH chain, halting", code)
+            raise Emulator::Executor::HaltSignal.new(code)
+          end
+
+          # Build EXCEPTION_RECORD in scratch: { code, flags, next, address,
+          # numparams, params[15] }. 80 bytes.
+          rec_addr = machine.scratch_alloc(80, zero: true)
+          machine.memory.write_u32(rec_addr +  0, code)
+          machine.memory.write_u32(rec_addr +  4, flags)
+          machine.memory.write_u32(rec_addr +  8, 0)              # ExceptionRecord*
+          machine.memory.write_u32(rec_addr + 12, machine.cpu.rip) # ExceptionAddress
+          machine.memory.write_u32(rec_addr + 16, [nargs, 15].min) # NumberParameters
+          if argp != 0 && nargs > 0
+            [nargs, 15].min.times do |i|
+              machine.memory.write_u32(rec_addr + 20 + i * 4,
+                                       machine.memory.read_u32(argp + i * 4))
+            end
+          end
+
+          # Build a minimal CONTEXT block (716 bytes). We zero it; the guest
+          # mostly cares about ContextFlags + EIP/ESP/EBP.
+          ctx_addr = machine.scratch_alloc(716, zero: true)
+          machine.memory.write_u32(ctx_addr +   0, 0x10007) # CONTEXT_FULL
+          machine.memory.write_u32(ctx_addr + 156, machine.cpu.registers.read32(7)) # Edi
+          machine.memory.write_u32(ctx_addr + 160, machine.cpu.registers.read32(6)) # Esi
+          machine.memory.write_u32(ctx_addr + 164, machine.cpu.registers.read32(3)) # Ebx
+          machine.memory.write_u32(ctx_addr + 168, machine.cpu.registers.read32(2)) # Edx
+          machine.memory.write_u32(ctx_addr + 172, machine.cpu.registers.read32(1)) # Ecx
+          machine.memory.write_u32(ctx_addr + 176, machine.cpu.registers.read32(0)) # Eax
+          machine.memory.write_u32(ctx_addr + 180, machine.cpu.registers.read32(5)) # Ebp
+          machine.memory.write_u32(ctx_addr + 184, machine.cpu.rip)                  # Eip
+          machine.memory.write_u32(ctx_addr + 196, machine.cpu.rsp)                  # Esp
+
+          # Read the EXCEPTION_REGISTRATION_RECORD at `frame`:
+          # struct { prev: u32, handler: u32 }
+          handler = machine.memory.read_u32(frame + 4)
+          warn format("[RaiseException] code=0x%08X -> handler=0x%08X frame=0x%08X",
+                       code, handler, frame)
+
+          # RaiseException is __stdcall (callee-pops), so first reclaim its
+          # own return address + 4 args from the guest stack — they would
+          # normally have been popped by Convention.cleanup. We then push a
+          # fresh frame for the handler:
+          #   esp -> halt_sentinel (handler return)
+          #          ExceptionRecord*
+          #          EstablisherFrame
+          #          ContextRecord*
+          #          DispatcherContext (unused)
+          machine.cpu.rsp = (machine.cpu.rsp + 4 * (1 + 4)) & machine.cpu.address_mask
+          machine.cpu.push32(machine.memory, 0)
+          machine.cpu.push32(machine.memory, ctx_addr)
+          machine.cpu.push32(machine.memory, frame)
+          machine.cpu.push32(machine.memory, rec_addr)
+          machine.cpu.push32(machine.memory, machine.halt_sentinel)
+          machine.cpu.rip = handler
+
+          Api::Dispatcher::SKIP_CLEANUP
+        end
+
+        # RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)
+        # Walk the SEH chain from current FS:[0] down to TargetFrame, popping
+        # each frame off the chain. If TargetFrame is 0/NULL, walk the whole
+        # chain (exit-process unwind). We don't call termination handlers
+        # ourselves; we just adjust FS:[0] and let the guest resume.
+        dispatcher.install_handler("kernel32.dll", "RtlUnwind", args: 4) do |machine, args|
+          target_frame = args[0] & 0xFFFF_FFFF
+          target_ip    = args[1] & 0xFFFF_FFFF
+          warn format("[RtlUnwind] target_frame=0x%08X target_ip=0x%08X",
+                       target_frame, target_ip)
+
+          frame = machine.memory.read_u32(machine.cpu.fs_base + 0)
+          steps = 0
+          while frame != 0xFFFF_FFFF && frame != target_frame && steps < 64
+            frame = machine.memory.read_u32(frame + 0) # follow .prev
+            steps += 1
+          end
+          machine.memory.write_u32(machine.cpu.fs_base + 0, frame)
+          0
         end
 
         dispatcher.install_handler("kernel32.dll", "GetLastError", args: 0) do |_machine, _args|

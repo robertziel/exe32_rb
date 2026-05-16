@@ -77,6 +77,20 @@ module Exe32Rb
       def step
         rip = @cpu.rip
         if rip == @halt_sentinel
+          # If we returned here from an SEH handler that requested
+          # ContinueSearch (eax == 1), walk to the next frame and try
+          # again. The Ruby stack frame for the SEH dispatch is gone, so
+          # we reconstruct it from @last_seh_state.
+          if @last_seh_state && @cpu.registers.read32(Registers::RAX) == 1
+            state = @last_seh_state
+            @last_seh_state = nil
+            next_frame = @memory.read_u32(state[:frame])
+            if next_frame != 0xFFFF_FFFF && next_frame != 0
+              # Re-raise with the same code, dispatching to next_frame
+              @memory.write_u32(@cpu.fs_base, next_frame)
+              return :seh if raise_guest_exception(state[:code], state[:params])
+            end
+          end
           @halted = true
           @exit_code ||= @cpu.registers.read32(Registers::RAX)
           return :halt
@@ -99,6 +113,67 @@ module Exe32Rb
         @halted = true
         @exit_code = e.exit_code
         :halt
+      rescue Exe32Rb::MemoryError => e
+        # Try to dispatch through SEH first — that's what real Windows does
+        # for access violations. If no handler is registered, fall through.
+        if raise_guest_exception(0xC0000005, [parse_fault_address(e.message) || 0])
+          :seh
+        else
+          raise
+        end
+      end
+
+      # Synthesize a Win32 exception and dispatch through the SEH chain.
+      # Returns true if a handler was found and rip was redirected, false
+      # if the chain was empty / no handler available.
+      def raise_guest_exception(code, params = [], flags: 0)
+        return false unless @cpu.mode == 32
+
+        frame = @memory.read_u32(@cpu.fs_base + 0)
+        return false if frame == 0xFFFF_FFFF || frame == 0
+
+        # Remember the dispatch parameters so the halt-sentinel handler can
+        # walk to the next frame if this handler returns ContinueSearch.
+        @last_seh_state = {code: code, params: params, frame: frame}
+
+        rec_addr = scratch_alloc(80, zero: true)
+        @memory.write_u32(rec_addr +  0, code)
+        @memory.write_u32(rec_addr +  4, flags)
+        @memory.write_u32(rec_addr +  8, 0)
+        @memory.write_u32(rec_addr + 12, @cpu.rip)
+        @memory.write_u32(rec_addr + 16, [params.size, 15].min)
+        params.first(15).each_with_index do |v, i|
+          @memory.write_u32(rec_addr + 20 + i * 4, v & 0xFFFF_FFFF)
+        end
+
+        ctx_addr = scratch_alloc(716, zero: true)
+        @memory.write_u32(ctx_addr +   0, 0x10007)
+        @memory.write_u32(ctx_addr + 156, @cpu.registers.read32(7))
+        @memory.write_u32(ctx_addr + 160, @cpu.registers.read32(6))
+        @memory.write_u32(ctx_addr + 164, @cpu.registers.read32(3))
+        @memory.write_u32(ctx_addr + 168, @cpu.registers.read32(2))
+        @memory.write_u32(ctx_addr + 172, @cpu.registers.read32(1))
+        @memory.write_u32(ctx_addr + 176, @cpu.registers.read32(0))
+        @memory.write_u32(ctx_addr + 180, @cpu.registers.read32(5))
+        @memory.write_u32(ctx_addr + 184, @cpu.rip)
+        @memory.write_u32(ctx_addr + 196, @cpu.rsp)
+
+        handler = @memory.read_u32(frame + 4)
+        return false if handler == 0 || handler == 0xFFFF_FFFF
+
+        warn format("[SEH] dispatching code=0x%08X to handler=0x%08X frame=0x%08X",
+                     code, handler, frame) if @trace
+        @cpu.push32(@memory, 0)
+        @cpu.push32(@memory, ctx_addr)
+        @cpu.push32(@memory, frame)
+        @cpu.push32(@memory, rec_addr)
+        @cpu.push32(@memory, @halt_sentinel)
+        @cpu.rip = handler
+        true
+      end
+
+      def parse_fault_address(message)
+        message.match(/0x([0-9A-Fa-f]+)/) { |m| m[1].to_i(16) }
       end
 
       def run(max_steps: 10_000_000)

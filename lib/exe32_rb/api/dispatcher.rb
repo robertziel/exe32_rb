@@ -108,6 +108,11 @@ module Exe32Rb
         @thunks.key?(address)
       end
 
+      # A handler may return :no_cleanup to signal it has already arranged
+      # the guest's stack/EIP itself (used by SEH-style APIs that "jump"
+      # to a guest handler instead of returning normally).
+      SKIP_CLEANUP = :no_cleanup
+
       def invoke(address, machine)
         imp = @thunks.fetch(address)
         entry = @handlers[key(imp.dll, imp.name || "##{imp.ordinal}")] || @missing
@@ -115,6 +120,8 @@ module Exe32Rb
 
         args   = entry.convention.read_args(machine, entry.args)
         result = entry.handler.call(machine, args)
+        return if result == SKIP_CLEANUP
+
         entry.convention.return_value(machine, result || 0)
         entry.convention.cleanup(machine, entry.args)
       end
