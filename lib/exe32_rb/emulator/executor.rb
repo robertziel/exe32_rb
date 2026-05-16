@@ -48,7 +48,31 @@ module Exe32Rb
 
       def op_mov(instr)
         dst, src = instr.operands
-        write_op(dst, read_op(src, dst.size))
+        # Inline the hot read_op + write_op dispatch — mov is the most
+        # frequent instruction (1/3 of guest ops) and shaving one method
+        # call per operand here saves real time in tight decompression
+        # loops. Falls back to the generic helpers for unusual operand
+        # types.
+        val = if src.is_a?(Operand::Reg)
+                src.high_byte ? @cpu.registers.read8h(src.idx) : @cpu.registers.read(src.size, src.idx)
+              elsif src.is_a?(Operand::Imm)
+                src.value & mask(dst.size)
+              elsif src.is_a?(Operand::Mem)
+                read_mem(src)
+              else
+                read_op(src, dst.size)
+              end
+        if dst.is_a?(Operand::Reg)
+          if dst.high_byte
+            @cpu.registers.write8h(dst.idx, val)
+          else
+            @cpu.registers.write(dst.size, dst.idx, val)
+          end
+        elsif dst.is_a?(Operand::Mem)
+          write_mem(dst, val)
+        else
+          write_op(dst, val)
+        end
       end
 
       def op_lea(instr)
