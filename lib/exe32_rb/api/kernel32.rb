@@ -315,17 +315,39 @@ module Exe32Rb
           argp  = args[3] & 0xFFFF_FFFF
 
           # Delphi-RTL exceptions (EXCEPTION_DELPHI* codes) pass a Delphi
-          # Exception object pointer in args. The object's structure starts
-          # with a vtable pointer; field +4 is FMessage (an AnsiString or
-          # UnicodeString — pointer to chars with length at [ptr-4]).
+          # Exception object pointer in args. obj+0 = VMT, obj+4 = FMessage
+          # (a UnicodeString — pointer with length at [ptr-4]). VMT-56 is
+          # a pointer to ClassName (Pascal ShortString: length byte + chars).
           if code == 0x0EEDFADE && nargs >= 1 && argp != 0
-            obj = machine.memory.read_u32(argp)
+            obj = machine.memory.read_u32(argp) rescue 0
             if obj != 0
-              msg_ptr = machine.memory.read_u32(obj + 4)
-              if msg_ptr != 0
-                msg_text = machine.read_wstring(msg_ptr)
-                warn format("[Delphi Exception] message=%s", msg_text.inspect) unless msg_text.empty?
+              vmt = machine.memory.read_u32(obj) rescue 0
+              cls_name = ""
+              if vmt != 0
+                name_ptr = machine.memory.read_u32((vmt - 56) & 0xFFFF_FFFF) rescue 0
+                if name_ptr != 0
+                  len = machine.memory.read_u8(name_ptr) rescue 0
+                  if len > 0 && len < 100
+                    cls_name = (1..len).map { |i| machine.memory.read_u8(name_ptr + i) }.pack('C*') rescue ""
+                  end
+                end
               end
+              msg_text = ""
+              msg_ptr = machine.memory.read_u32(obj + 4) rescue 0
+              if msg_ptr != 0
+                begin
+                  len = machine.memory.read_u32((msg_ptr - 4) & 0xFFFF_FFFF)
+                  if len > 0 && len < 1000
+                    bytes = (0...len*2).map { |i| machine.memory.read_u8(msg_ptr + i) }.pack('C*')
+                    msg_text = bytes.force_encoding('UTF-16LE')
+                                    .encode('UTF-8', invalid: :replace, undef: :replace)
+                  end
+                rescue
+                end
+              end
+              warn format("[Delphi Exception] class=%s message=%s",
+                          cls_name.empty? ? "?" : cls_name,
+                          msg_text.empty? ? "(none)" : msg_text.inspect)
             end
           end
 
